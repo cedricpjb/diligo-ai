@@ -1,0 +1,6 @@
+Company: Starter Co
+FY2025
+Revenue USD 1250000.00
+Cash USD 480000.00
+Debt USD 900000.00
+All material contracts are signed.

@@ -32,6 +32,8 @@ npm run build
 
 - `lib/api.ts`: the one function, `checkClaims`, that all data goes through.
 - `lib/types.ts`: types copied from the contract.
+- `lib/export.ts`: Excel export with SheetJS (`xlsx`, installed from the official SheetJS CDN because the npm
+  `xlsx` package is stale). Loaded only when Export to Excel is pressed.
 - `lib/files.ts`: upload rules (allowed types, size limits, duplicates).
 - `scripts/sync-mock.mjs`: copies `docs/mock-response.json` into `lib/generated/` (git-ignored)
   before dev, build and type checks, because Next.js cannot import files outside `web/`.

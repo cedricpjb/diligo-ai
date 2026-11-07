@@ -28,12 +28,21 @@ export function sortFindings(findings: Finding[]): Finding[] {
     .map((entry) => entry.finding)
 }
 
+export interface LargestGap {
+  finding: Finding
+  /** The signed gap in integer cents, as the API sent it. */
+  cents: number
+}
+
 export interface Summary {
   yes: number
   no: number
   needsReview: number
-  /** Sum of the absolute dollar gaps, in integer cents. Null when no finding has a dollar amount. */
-  totalGapCents: number | null
+  /**
+   * The single finding with the biggest dollar gap by size. Gaps of different line items
+   * are never added together. Null when no finding has a dollar amount.
+   */
+  largestGap: LargestGap | null
   /** How many findings carry a dollar gap. */
   gapCount: number
   mockedCount: number
@@ -43,7 +52,7 @@ export function summarize(findings: Finding[]): Summary {
   let yes = 0
   let no = 0
   let needsReview = 0
-  let totalGapCents = 0
+  let largestGap: LargestGap | null = null
   let gapCount = 0
   let mockedCount = 0
 
@@ -54,8 +63,11 @@ export function summarize(findings: Finding[]): Summary {
 
     const gap = toCents(finding.gap_usd)
     if (gap !== null) {
-      totalGapCents += Math.abs(gap)
       gapCount++
+      // Strictly larger wins, so a tie keeps the earlier finding.
+      if (largestGap === null || Math.abs(gap) > Math.abs(largestGap.cents)) {
+        largestGap = { finding, cents: gap }
+      }
     }
     if (finding.mocked) mockedCount++
   }
@@ -64,7 +76,7 @@ export function summarize(findings: Finding[]): Summary {
     yes,
     no,
     needsReview,
-    totalGapCents: gapCount > 0 ? totalGapCents : null,
+    largestGap,
     gapCount,
     mockedCount,
   }
@@ -82,6 +94,15 @@ export function sourceUsage(sources: Source[], findings: Finding[]): SourceUsage
     asClaim: findings.filter((f) => f.claim_source.name === source.name).length,
     asProof: findings.filter((f) => f.proof_source?.name === source.name).length,
   }))
+}
+
+/**
+ * A short name for a claim, for tight places: "Revenue was $1,250,000.00." becomes "Revenue".
+ * It only ever shortens the claim's own words, and falls back to the whole claim.
+ */
+export function claimName(claim: string): string {
+  const match = /^(.{2,40}?)\s+(?:was|were|is|are)\s/i.exec(claim.trim())
+  return match ? match[1] : claim.trim()
 }
 
 /** Seconds into the audio as m:ss.t, e.g. 4.2 becomes "0:04.2". */

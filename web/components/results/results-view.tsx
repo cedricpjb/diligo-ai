@@ -2,10 +2,12 @@
 
 import { useMemo, useState } from "react"
 import Link from "next/link"
-import { Download, Info, X } from "lucide-react"
+import { AlertCircle, Download, Info, Loader2, X } from "lucide-react"
 
+import { exportFindingsToExcel } from "@/lib/export"
 import { sortFindings, sourceUsage, summarize, type ReviewState } from "@/lib/findings"
 import type { StoredInvestigation } from "@/lib/investigation-store"
+import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { EvidenceDrawer } from "./evidence-drawer"
@@ -35,13 +37,24 @@ function Results({ investigation }: { investigation: StoredInvestigation }) {
   const [reviews, setReviews] = useState<Record<string, ReviewState | undefined>>({})
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
-  const [exportNote, setExportNote] = useState(false)
+  const [exportState, setExportState] = useState<ExportState>({ status: "idle" })
 
   const selected = findings.find((finding) => finding.id === selectedId) ?? null
 
   function openFinding(id: string) {
     setSelectedId(id)
     setDrawerOpen(true)
+  }
+
+  async function exportToExcel() {
+    if (exportState.status === "working") return
+    setExportState({ status: "working" })
+    try {
+      const fileName = await exportFindingsToExcel(findings, investigation.dealName)
+      setExportState({ status: "done", fileName })
+    } catch {
+      setExportState({ status: "failed" })
+    }
   }
 
   function mark(id: string, next: ReviewState) {
@@ -71,15 +84,20 @@ function Results({ investigation }: { investigation: StoredInvestigation }) {
         </div>
         <Button
           variant="outline"
-          onClick={() => setExportNote(true)}
+          onClick={exportToExcel}
+          disabled={exportState.status === "working"}
           className="h-11 shrink-0 gap-2 self-start px-4 sm:h-10"
         >
-          <Download aria-hidden />
-          Export to Excel
+          {exportState.status === "working" ? (
+            <Loader2 className="animate-spin" aria-hidden />
+          ) : (
+            <Download aria-hidden />
+          )}
+          {exportState.status === "working" ? "Preparing the file…" : "Export to Excel"}
         </Button>
       </header>
 
-      {(investigation.sample || summary.mockedCount > 0 || exportNote) && (
+      {(investigation.sample || summary.mockedCount > 0 || exportState.status !== "idle") && (
         <div className="flex flex-col gap-3" aria-label="Notices">
           {investigation.sample && (
             <Notice>
@@ -97,10 +115,27 @@ function Results({ investigation }: { investigation: StoredInvestigation }) {
               {summary.mockedCount === 1 ? "it" : "them"} as placeholders.
             </Notice>
           )}
-          {exportNote && (
-            <Notice role="status" onDismiss={() => setExportNote(false)}>
-              <strong className="font-medium text-foreground">Excel export is not connected yet.</strong>{" "}
-              When it is, this button will download the findings and sources as one .xlsx file.
+          {exportState.status === "done" && (
+            <Notice role="status" onDismiss={() => setExportState({ status: "idle" })}>
+              <strong className="font-medium text-foreground">Excel file ready.</strong> Your
+              browser is saving{" "}
+              <span className="font-mono text-xs break-all text-foreground">
+                {exportState.fileName}
+              </span>
+              , with one row for each of the {response.findings.length}{" "}
+              {response.findings.length === 1 ? "finding" : "findings"}.
+            </Notice>
+          )}
+          {exportState.status === "failed" && (
+            <Notice
+              role="alert"
+              tone="error"
+              onDismiss={() => setExportState({ status: "idle" })}
+            >
+              <strong className="font-medium text-foreground">
+                The Excel file could not be made.
+              </strong>{" "}
+              Try Export to Excel again. If it keeps failing, reload this page.
             </Notice>
           )}
         </div>
@@ -121,21 +156,38 @@ function Results({ investigation }: { investigation: StoredInvestigation }) {
   )
 }
 
+type ExportState =
+  | { status: "idle" }
+  | { status: "working" }
+  | { status: "done"; fileName: string }
+  | { status: "failed" }
+
 function Notice({
   children,
   role,
+  tone,
   onDismiss,
 }: {
   children: React.ReactNode
-  role?: "status"
+  role?: "status" | "alert"
+  tone?: "error"
   onDismiss?: () => void
 }) {
+  const Icon = tone === "error" ? AlertCircle : Info
   return (
     <div
       role={role}
-      className="flex items-start gap-3 rounded-xl border border-border bg-white/[0.02] px-4 py-3 text-sm text-muted-foreground"
+      className={cn(
+        "flex items-start gap-3 rounded-xl border px-4 py-3 text-sm text-muted-foreground",
+        tone === "error"
+          ? "border-destructive/30 bg-destructive/[0.06]"
+          : "border-border bg-white/[0.02]"
+      )}
     >
-      <Info className="mt-0.5 size-4 shrink-0" aria-hidden />
+      <Icon
+        className={cn("mt-0.5 size-4 shrink-0", tone === "error" && "text-destructive")}
+        aria-hidden
+      />
       <p className="min-w-0 flex-1 leading-relaxed">{children}</p>
       {onDismiss && (
         <button

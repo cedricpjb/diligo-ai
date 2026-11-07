@@ -58,7 +58,7 @@ Audio in `claims_audio` is transcribed by the backend with ElevenLabs speech-to-
   ],
   "transcript": {
     "segments": [
-      { "start": number, "end": number, "speaker": string | null, "text": string }
+      { "source": string, "start": number, "end": number, "speaker": string | null, "text": string }
     ]
   } | null
 }
@@ -81,7 +81,7 @@ Audio in `claims_audio` is transcribed by the backend with ElevenLabs speech-to-
 
 ### Transcript
 
-`transcript` is `null` when no `claims_audio` was sent. `start` and `end` are seconds into the audio.
+`transcript` is `null` when no `claims_audio` was sent. Each segment's `source` is the filename of the audio file it came from, and matches a `name` in `sources`. `start` and `end` are seconds into that audio file.
 
 ### Decision rules
 

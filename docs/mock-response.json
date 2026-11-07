@@ -118,18 +118,21 @@
   "transcript": {
     "segments": [
       {
+        "source": "management_call.m4a",
         "start": 0.0,
         "end": 4.2,
         "speaker": "speaker_0",
         "text": "Revenue for the period was $1,250,000.00."
       },
       {
+        "source": "management_call.m4a",
         "start": 4.2,
         "end": 9.6,
         "speaker": "speaker_0",
         "text": "Cash on hand was $480,000.00 and total debt was $900,000.00."
       },
       {
+        "source": "management_call.m4a",
         "start": 9.6,
         "end": 12.3,
         "speaker": "speaker_0",

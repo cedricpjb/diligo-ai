@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { createApp, MAX_REQUEST_BYTES } from '../src/app.js';
 import { checkClaims, probabilityDecision, verifyQuotes } from '../src/check.js';
 import { ENV_FILE, loadConfig, parseConfig } from '../src/config.js';
-import { extractClaims, normalizePeriod } from '../src/extract.js';
+import { contractRows, extractClaims, normalizePeriod } from '../src/extract.js';
 import { createJev, type Jev, type Transport } from '../src/jev.js';
 import { compareMoney, decimal, parseMoney } from '../src/money.js';
 import { createTranscriber } from '../src/transcribe.js';
@@ -23,6 +23,8 @@ const source = (text: string, name = 'source.txt'): SourceText => ({ text, name,
 const neverJev: Jev = { async ask() { assert.fail('Numeric claims or missing evidence must not call Jev.'); } };
 const check = (claim: string, proof: string, jev = neverJev) => checkClaims([source(claim, 'claims.txt')], [source(proof, 'proof.txt')], jev);
 const fixture = JSON.parse(await readFile(new URL('../../../docs/mock-response.json', import.meta.url), 'utf8')) as CheckResponse;
+// Verbatim excerpt from the starter kit's sample contract-register.txt.
+const starterRegisterLine = 'Target 01 contract register. CT-100 signed; CT-101 signed; CT-102 unsigned as of September 30, 2026.';
 
 function assertObject(value: unknown, keys: string[]): asserts value is Record<string, unknown> {
   assert.ok(value !== null && typeof value === 'object' && !Array.isArray(value));
@@ -175,6 +177,44 @@ test('contracts: register column headers, quoted values, and unknown status', as
   const unknown = await check('contracts are signed', 'CT-101,signed\nCT-102,pending', createJev());
   assert.equal(unknown.findings[0]!.decision, 'NEEDS_REVIEW');
 });
+
+test('contracts: real starter register extracts every inline entry with its original line', () => {
+  const register = source(`FICTIONAL DEAL DOCUMENT\n${starterRegisterLine}\n`, 'contract-register.txt');
+  const rows = contractRows(register);
+  assert.deepEqual(rows.map(({ id, signed, period }) => ({ id, signed, period })), [
+    { id: 'CT-100', signed: true, period: 'ASOF:2026-09-30' },
+    { id: 'CT-101', signed: true, period: 'ASOF:2026-09-30' },
+    { id: 'CT-102', signed: false, period: 'ASOF:2026-09-30' },
+  ]);
+  for (const row of rows) { assert.equal(row.quote, starterRegisterLine); assert.equal(row.source, register); }
+});
+
+test('contracts: calendar quarter-end register dates match the corresponding quarter', async () => {
+  for (const [date, quarter] of [['March 31', 'Q1'], ['June 30', 'Q2'], ['September 30', 'Q3'], ['December 31', 'Q4']]) {
+    const result = await check(`2026 ${quarter}. All contracts are signed.`, `CT-102 unsigned as of ${date}, 2026.`, createJev());
+    assert.equal(result.findings[0]!.decision, 'NO', date);
+  }
+  const exact = await check('2026-09-30\nAll contracts are signed.', starterRegisterLine, createJev());
+  assert.equal(exact.findings[0]!.decision, 'NO');
+});
+
+test('contracts: missing, invalid, ambiguous and mismatched register dates still need review', async () => {
+  for (const proof of [
+    starterRegisterLine.replace('2026', '2025'),
+    starterRegisterLine.replace('September 30', 'June 30'),
+    starterRegisterLine.replace('September 30', 'September 29'),
+    starterRegisterLine.replace('September 30', 'September 31'),
+    starterRegisterLine.replace(' as of September 30, 2026', ''),
+    `Q2 2026\n${starterRegisterLine.replace('Target 01', 'Q2 2026. Target 01')}`,
+  ]) {
+    const result = await check('2026 Q3. All contracts are signed.', proof);
+    assert.equal(result.findings[0]!.decision, 'NEEDS_REVIEW', proof);
+    assert.equal(result.findings[0]!.proof_source, null);
+    assert.equal(result.findings[0]!.jev_probability, null);
+  }
+  const numeric = await check('Q3 2026\nCash USD 100', '2026-09-30\ncash,100');
+  assert.equal(numeric.findings[0]!.decision, 'NEEDS_REVIEW', 'Numeric period matching is unchanged.');
+});
 test('evidence: conflicting or missing amounts require review without Jev', async () => {
   assert.equal((await check('Revenue USD 100', 'revenue,100\nrevenue,90')).findings[0]!.decision, 'NEEDS_REVIEW');
   assert.ok((await check('Debt USD 100\ncontracts are signed', 'cash,100')).findings.every(f => f.decision === 'NEEDS_REVIEW' && f.jev_probability === null));
@@ -306,6 +346,21 @@ test('HTTP: starter multipart, response shape, CORS and decimal strings', async 
     for (const field of ['claimed_usd', 'proof_usd', 'gap_usd', 'gap_pct'] as const) assert.equal(finding[field], expected[field], field);
   }
 }));
+
+test('HTTP: real starter register returns NO for CT-102 with the original proof line and filename', async () => withServer(async url => {
+  const body = new FormData();
+  body.append('claims_files', new Blob(['2026 Q3. Management claims all material contracts are signed.']), 'management-summary.txt');
+  body.append('proof_files', new Blob([`FICTIONAL DEAL DOCUMENT\n${starterRegisterLine}\n`]), 'contract-register.txt');
+  const response = await fetch(url, { method: 'POST', body });
+  assert.equal(response.status, 200);
+  const result: unknown = await response.json(); assertResponse(result);
+  assert.equal(result.period, '2026-Q3'); assert.equal(result.findings.length, 1);
+  const finding = result.findings[0]!;
+  assert.equal(finding.decision, 'NO'); assert.equal(finding.label, 'discrepancy');
+  assert.match(finding.explanation, /CT-102.*unsigned/);
+  assert.deepEqual(finding.proof_source, { name: 'contract-register.txt', quote: starterRegisterLine, url: null });
+  assert.equal(finding.jev_probability, 0.99, 'An unsigned entry overrides even a high Jev probability.');
+}, { jev: { async ask() { return { probability: 0.99, mocked: false }; } } }));
 test('HTTP: missing numeric and contract evidence leaves evidence fields null without Jev', async () => withServer(async url => {
   const body = form('Revenue USD 100.00\ncontracts are signed');
   body.set('proof_files', new Blob(['cash,100.00']), 'proof.csv');

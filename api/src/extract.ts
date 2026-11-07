@@ -85,12 +85,29 @@ export function extractClaims(source: SourceText): Claim[] {
   return claims;
 }
 export interface ContractRow { id: string; signed: boolean | null; quote: string; source: SourceText; period: string | null }
+function contractPeriodFromLine(line: string): string | null {
+  const periods = [periodFromLine(line)].filter((p): p is string => p !== null);
+  for (const match of line.matchAll(/\bas\s+of\s+([a-z]+)\s+(\d{1,2}),\s*(20\d{2})\b/gi)) {
+    const month = 'january february march april may june july august september october november december'.split(' ').indexOf(match[1]!.toLowerCase());
+    const day = Number(match[2]); const year = Number(match[3]);
+    const date = new Date(Date.UTC(year, month, day));
+    periods.push(month < 0 || date.getUTCMonth() !== month || date.getUTCDate() !== day ? 'AMBIGUOUS'
+      : `ASOF:${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
+  }
+  return new Set(periods).size > 1 ? 'AMBIGUOUS' : periods[0] ?? null;
+}
+export function sameContractPeriod(register: string | null, claim: string | null): boolean {
+  if (samePeriod(register, claim)) return true;
+  // A contract-status snapshot at calendar quarter end also covers that quarter.
+  const asOf = /^ASOF:(20\d{2})-(03-31|06-30|09-30|12-31)$/.exec(register ?? '');
+  return asOf !== null && claim === `${asOf[1]}-Q${['03-31', '06-30', '09-30', '12-31'].indexOf(asOf[2]!) + 1}`;
+}
 export function contractRows(source: SourceText): ContractRow[] {
   let period: string | null = null;
   let header: string[] | null = null;
   const result: ContractRow[] = [];
   for (const line of source.text.split(/\r?\n/)) {
-    const linePeriod = periodFromLine(line);
+    const linePeriod = contractPeriodFromLine(line);
     const columns = record(line);
     if (columns?.some(c => /^(contract_id|contract|id)$/i.test(c)) && columns.some(c => /^(status|signed)$/i.test(c))) {
       header = columns.map(c => c.toLowerCase()); continue;
@@ -106,10 +123,10 @@ export function contractRows(source: SourceText): ContractRow[] {
       continue;
     }
     // Register IDs may be CT-102, vendor-7, or another non-whitespace identifier.
-    const match = /^\s*([\w-]+)\s*[,;:\t]\s*(unsigned|signed)\s*(?:[,;\t].*)?$/i.exec(line)
-      ?? /\b([A-Z]+-\d+)\s+(?:is\s+|was\s+)?(unsigned|signed)\b/i.exec(line);
-    if (match) result.push({ id: match[1]!, signed: match[2]!.toLowerCase() === 'signed', quote: line.trim(), source, period: linePeriod ?? period });
-    else if (linePeriod) period = linePeriod;
+    const delimited = /^\s*([\w-]+)\s*[,;:\t]\s*(unsigned|signed)\s*(?:[,;\t].*)?$/i.exec(line);
+    const matches = delimited ? [delimited] : [...line.matchAll(/\b([A-Z]+-\d+)\s+(?:is\s+|was\s+)?(unsigned|signed)\b/gi)];
+    for (const match of matches) result.push({ id: match[1]!, signed: match[2]!.toLowerCase() === 'signed', quote: line.trim(), source, period: linePeriod ?? period });
+    if (!matches.length && linePeriod) period = linePeriod;
   }
   return result;
 }

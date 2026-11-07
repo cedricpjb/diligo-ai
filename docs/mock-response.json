@@ -6,10 +6,16 @@
       "id": "f-revenue",
       "claim": "Revenue was $1,250,000.00.",
       "claim_source": {
-        "name": "management_claims.txt",
-        "quote": "Revenue for the period was $1,250,000.00."
+        "name": "management_call.m4a",
+        "quote": "Revenue for the period was $1,250,000.00.",
+        "timestamp_start": 0.0,
+        "timestamp_end": 4.2,
+        "speaker": "speaker_0"
       },
       "label": "discrepancy",
+      "decision": "NO",
+      "jev_probability": null,
+      "explanation": "Management said revenue was $1,250,000.00, but the finance report shows $1,175,000.00.",
       "proof_source": {
         "name": "finance_report.csv",
         "quote": "revenue,1175000.00",
@@ -20,16 +26,23 @@
       "gap_usd": "75000.00",
       "gap_pct": "6.00",
       "priority": "high",
-      "next_action": "Ask management to reconcile the $75,000.00 revenue gap against the finance report."
+      "next_action": "Ask management to reconcile the $75,000.00 revenue gap against the finance report.",
+      "mocked": false
     },
     {
       "id": "f-cash",
       "claim": "Cash was $480,000.00.",
       "claim_source": {
-        "name": "management_claims.txt",
-        "quote": "Cash on hand was $480,000.00."
+        "name": "management_call.m4a",
+        "quote": "Cash on hand was $480,000.00",
+        "timestamp_start": 4.2,
+        "timestamp_end": 7.1,
+        "speaker": "speaker_0"
       },
       "label": "discrepancy",
+      "decision": "NO",
+      "jev_probability": null,
+      "explanation": "Management said cash was $480,000.00, but the finance report shows $410,000.00.",
       "proof_source": {
         "name": "finance_report.csv",
         "quote": "cash,410000.00",
@@ -40,16 +53,23 @@
       "gap_usd": "70000.00",
       "gap_pct": "14.58",
       "priority": "high",
-      "next_action": "Request bank statements to confirm the cash balance and explain the $70,000.00 gap."
+      "next_action": "Request bank statements to confirm the cash balance and explain the $70,000.00 gap.",
+      "mocked": false
     },
     {
       "id": "f-debt",
       "claim": "Debt was $900,000.00.",
       "claim_source": {
-        "name": "management_claims.txt",
-        "quote": "Total debt was $900,000.00."
+        "name": "management_call.m4a",
+        "quote": "total debt was $900,000.00.",
+        "timestamp_start": 7.1,
+        "timestamp_end": 9.6,
+        "speaker": "speaker_0"
       },
       "label": "supported",
+      "decision": "YES",
+      "jev_probability": null,
+      "explanation": "The finance report shows debt of $900,000.00, which matches the claim.",
       "proof_source": {
         "name": "finance_report.csv",
         "quote": "debt,900000.00",
@@ -60,16 +80,23 @@
       "gap_usd": "0.00",
       "gap_pct": "0.00",
       "priority": "low",
-      "next_action": "No action needed. Debt matches the finance report."
+      "next_action": "No action needed. Debt matches the finance report.",
+      "mocked": false
     },
     {
       "id": "f-contracts",
       "claim": "All material contracts are signed.",
       "claim_source": {
-        "name": "management_claims.txt",
-        "quote": "all material contracts are signed"
+        "name": "management_call.m4a",
+        "quote": "all material contracts are signed",
+        "timestamp_start": 9.6,
+        "timestamp_end": 12.3,
+        "speaker": "speaker_0"
       },
       "label": "discrepancy",
+      "decision": "NO",
+      "jev_probability": 0.04,
+      "explanation": "The finance report lists contract CT-102 as unsigned, so not all material contracts are signed.",
       "proof_source": {
         "name": "finance_report.csv",
         "quote": "CT-102,unsigned",
@@ -80,11 +107,34 @@
       "gap_usd": null,
       "gap_pct": null,
       "priority": "high",
-      "next_action": "Get the signed copy of contract CT-102 or confirm it is not material."
+      "next_action": "Get the signed copy of contract CT-102 or confirm it is not material.",
+      "mocked": true
     }
   ],
   "sources": [
-    { "name": "management_claims.txt", "type": "upload", "date": null, "url": null },
+    { "name": "management_call.m4a", "type": "upload", "date": null, "url": null },
     { "name": "finance_report.csv", "type": "upload", "date": null, "url": null }
-  ]
+  ],
+  "transcript": {
+    "segments": [
+      {
+        "start": 0.0,
+        "end": 4.2,
+        "speaker": "speaker_0",
+        "text": "Revenue for the period was $1,250,000.00."
+      },
+      {
+        "start": 4.2,
+        "end": 9.6,
+        "speaker": "speaker_0",
+        "text": "Cash on hand was $480,000.00 and total debt was $900,000.00."
+      },
+      {
+        "start": 9.6,
+        "end": 12.3,
+        "speaker": "speaker_0",
+        "text": "I can also confirm that all material contracts are signed."
+      }
+    ]
+  }
 }

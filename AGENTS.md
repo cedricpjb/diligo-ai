@@ -18,10 +18,19 @@ These rules apply to every agent working in this repo.
 - All money math happens in code using integer cents.
 - Never use floats for money, and never let the AI model do the math.
 
+## Design
+
+- Follow `docs/DESIGN.md`.
+
 ## Secrets
 
 - Never put API keys in code, prompts or commits.
 - Keys come from `.env` files, which are git-ignored.
+- `JEV_API_KEY`, `ELEVENLABS_API_KEY` and `ANTHROPIC_API_KEY` live only in `api/.env`, which is git-ignored. Never in `web/`, never in code, prompts or commits.
+
+## External services
+
+- Jev and ElevenLabs are called only from `api/`. The frontend never calls them.
 
 ## Uploaded documents
 

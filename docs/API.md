@@ -20,6 +20,16 @@ Checks management claims against proof documents and returns one finding per cla
 
 Audio in `claims_audio` is transcribed by the backend with ElevenLabs speech-to-text. The transcript is treated as claim text.
 
+#### Plain-text contract register format
+
+Registers may list multiple `ID signed` or `ID unsigned` entries on one line,
+separated by semicolons, with introductory text and a trailing `as of Month D, YYYY`
+snapshot date applying to the whole line. For example: `CT-100 signed; CT-101 signed; CT-102 unsigned as of September 30, 2026.`
+For contract-status checks, a snapshot dated on a calendar quarter's final day
+matches that quarter in the same year (September 30, 2026 matches 2026 Q3).
+The original register line and uploaded filename are retained as the proof quote
+and source name; the deterministic contract-status rule below is unchanged.
+
 ### Response 200
 
 `Content-Type: application/json`

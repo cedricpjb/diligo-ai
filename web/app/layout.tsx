@@ -53,7 +53,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
         <TooltipProvider>
           <SidebarProvider defaultOpen={sidebarOpen}>
             <AppSidebar />
-            <SidebarInset id="main" tabIndex={-1} className="outline-none">
+            <SidebarInset id="main" tabIndex={-1} className="min-w-0 outline-none">
               <AppHeader />
               {children}
             </SidebarInset>

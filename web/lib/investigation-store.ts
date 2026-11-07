@@ -11,21 +11,12 @@ export interface StoredInvestigation {
   response: CheckResponse
 }
 
-const KEY = "diligo:last-investigation"
+export const INVESTIGATION_KEY = "diligo:last-investigation"
 
 export function saveInvestigation(investigation: StoredInvestigation): void {
   try {
-    sessionStorage.setItem(KEY, JSON.stringify(investigation))
+    sessionStorage.setItem(INVESTIGATION_KEY, JSON.stringify(investigation))
   } catch {
     // Storage can be full or blocked; the Results screen then shows its empty state.
-  }
-}
-
-export function loadInvestigation(): StoredInvestigation | null {
-  try {
-    const raw = sessionStorage.getItem(KEY)
-    return raw ? (JSON.parse(raw) as StoredInvestigation) : null
-  } catch {
-    return null
   }
 }

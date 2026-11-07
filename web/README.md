@@ -7,14 +7,14 @@ Next.js (App Router), TypeScript, Tailwind CSS v4 and shadcn/ui. Dark theme only
 ```bash
 cd web
 npm install
-npm run dev        # http://localhost:3000
+npm run dev -- --port 3000   # http://localhost:3000 (the API allows this origin)
 ```
 
 Without `NEXT_PUBLIC_API_URL`, the app serves the starter case from `docs/mock-response.json`
 (the sidebar says "Sample data"). To use the backend, put this in `web/.env.local`:
 
 ```bash
-NEXT_PUBLIC_API_URL=http://localhost:4000
+NEXT_PUBLIC_API_URL=http://127.0.0.1:3001
 ```
 
 The browser then posts to `${NEXT_PUBLIC_API_URL}/api/check` (see `docs/API.md`). It never calls

@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Environment files (API keys live here, never commit them)
+.env*
+
+# Build output
+.next/
+dist/
+
+# Playwright output (may contain credentials)
+.playwright/
+.playwright-cli/

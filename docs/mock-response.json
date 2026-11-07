@@ -1,0 +1,90 @@
+{
+  "company": "Starter Co",
+  "period": "FY2025",
+  "findings": [
+    {
+      "id": "f-revenue",
+      "claim": "Revenue was $1,250,000.00.",
+      "claim_source": {
+        "name": "management_claims.txt",
+        "quote": "Revenue for the period was $1,250,000.00."
+      },
+      "label": "discrepancy",
+      "proof_source": {
+        "name": "finance_report.csv",
+        "quote": "revenue,1175000.00",
+        "url": null
+      },
+      "claimed_usd": "1250000.00",
+      "proof_usd": "1175000.00",
+      "gap_usd": "75000.00",
+      "gap_pct": "6.00",
+      "priority": "high",
+      "next_action": "Ask management to reconcile the $75,000.00 revenue gap against the finance report."
+    },
+    {
+      "id": "f-cash",
+      "claim": "Cash was $480,000.00.",
+      "claim_source": {
+        "name": "management_claims.txt",
+        "quote": "Cash on hand was $480,000.00."
+      },
+      "label": "discrepancy",
+      "proof_source": {
+        "name": "finance_report.csv",
+        "quote": "cash,410000.00",
+        "url": null
+      },
+      "claimed_usd": "480000.00",
+      "proof_usd": "410000.00",
+      "gap_usd": "70000.00",
+      "gap_pct": "14.58",
+      "priority": "high",
+      "next_action": "Request bank statements to confirm the cash balance and explain the $70,000.00 gap."
+    },
+    {
+      "id": "f-debt",
+      "claim": "Debt was $900,000.00.",
+      "claim_source": {
+        "name": "management_claims.txt",
+        "quote": "Total debt was $900,000.00."
+      },
+      "label": "supported",
+      "proof_source": {
+        "name": "finance_report.csv",
+        "quote": "debt,900000.00",
+        "url": null
+      },
+      "claimed_usd": "900000.00",
+      "proof_usd": "900000.00",
+      "gap_usd": "0.00",
+      "gap_pct": "0.00",
+      "priority": "low",
+      "next_action": "No action needed. Debt matches the finance report."
+    },
+    {
+      "id": "f-contracts",
+      "claim": "All material contracts are signed.",
+      "claim_source": {
+        "name": "management_claims.txt",
+        "quote": "all material contracts are signed"
+      },
+      "label": "discrepancy",
+      "proof_source": {
+        "name": "finance_report.csv",
+        "quote": "CT-102,unsigned",
+        "url": null
+      },
+      "claimed_usd": null,
+      "proof_usd": null,
+      "gap_usd": null,
+      "gap_pct": null,
+      "priority": "high",
+      "next_action": "Get the signed copy of contract CT-102 or confirm it is not material."
+    }
+  ],
+  "sources": [
+    { "name": "management_claims.txt", "type": "upload", "date": null, "url": null },
+    { "name": "finance_report.csv", "type": "upload", "date": null, "url": null }
+  ]
+}

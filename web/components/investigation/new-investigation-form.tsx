@@ -7,7 +7,12 @@ import { AlertCircle, ArrowRight } from "lucide-react"
 import { ApiError, checkClaims, isAbort, isSampleMode } from "@/lib/api"
 import {
   CLAIMS_RULES,
+  MAX_FILES,
+  MAX_REQUEST_BYTES,
   PROOF_RULES,
+  formatBytes,
+  requestBytes,
+  requestError,
   screenFiles,
   type Rejection,
   type UploadItem,
@@ -19,7 +24,7 @@ import { Label } from "@/components/ui/label"
 import { FileDropzone } from "./file-dropzone"
 import { ProcessingPanel, type ProcessingStep } from "./processing-panel"
 
-type FieldErrors = Partial<Record<"dealName" | "ticker" | "claims" | "proof", string>>
+type FieldErrors = Partial<Record<"dealName" | "ticker" | "claims" | "proof" | "request", string>>
 
 type Phase =
   | { kind: "idle" }
@@ -47,6 +52,7 @@ export function NewInvestigationForm() {
   const panelRef = useRef<HTMLDivElement>(null)
   const dealNameRef = useRef<HTMLInputElement>(null)
   const tickerRef = useRef<HTMLInputElement>(null)
+  const requestErrorRef = useRef<HTMLParagraphElement>(null)
 
   const audioCount = claims.filter((item) => item.kind === "audio").length
   const busy = phase.kind === "running" || phase.kind === "finished"
@@ -72,7 +78,8 @@ export function NewInvestigationForm() {
   function addFiles(zone: "claims" | "proof", files: File[]) {
     const rules = zone === "claims" ? CLAIMS_RULES : PROOF_RULES
     const current = zone === "claims" ? claims : proof
-    const { accepted, rejected } = screenFiles(files, current, rules)
+    // The limits are shared, so every file in both areas counts.
+    const { accepted, rejected } = screenFiles(files, [...claims, ...proof], rules)
     if (zone === "claims") {
       setClaims([...current, ...accepted])
       setClaimsRejected(rejected)
@@ -80,7 +87,14 @@ export function NewInvestigationForm() {
       setProof([...current, ...accepted])
       setProofRejected(rejected)
     }
-    if (accepted.length > 0) setErrors((prev) => ({ ...prev, [zone]: undefined }))
+    if (accepted.length > 0) setErrors((prev) => ({ ...prev, [zone]: undefined, request: undefined }))
+  }
+
+  function removeFile(zone: "claims" | "proof", id: string) {
+    const drop = (items: UploadItem[]) => items.filter((item) => item.id !== id)
+    if (zone === "claims") setClaims(drop)
+    else setProof(drop)
+    setErrors((prev) => ({ ...prev, request: undefined }))
   }
 
   function validate(): FieldErrors {
@@ -91,6 +105,9 @@ export function NewInvestigationForm() {
     }
     if (claims.length === 0) next.claims = "Add at least one file of what management said."
     if (proof.length === 0) next.proof = "Add at least one proof document."
+    // The upload limits again, over everything about to be sent, before any request.
+    const limit = requestError([...claims, ...proof])
+    if (limit) next.request = limit
     return next
   }
 
@@ -105,6 +122,7 @@ export function NewInvestigationForm() {
     if (Object.keys(found).length > 0) {
       if (found.dealName) dealNameRef.current?.focus()
       else if (found.ticker) tickerRef.current?.focus()
+      else if (found.request) requestErrorRef.current?.focus()
       return
     }
 
@@ -252,7 +270,7 @@ export function NewInvestigationForm() {
             error={errors.claims}
             disabled={busy}
             onAdd={(files) => addFiles("claims", files)}
-            onRemove={(id) => setClaims((prev) => prev.filter((item) => item.id !== id))}
+            onRemove={(id) => removeFile("claims", id)}
             onDismissRejections={() => setClaimsRejected([])}
           />
           <FileDropzone
@@ -265,7 +283,7 @@ export function NewInvestigationForm() {
             error={errors.proof}
             disabled={busy}
             onAdd={(files) => addFiles("proof", files)}
-            onRemove={(id) => setProof((prev) => prev.filter((item) => item.id !== id))}
+            onRemove={(id) => removeFile("proof", id)}
             onDismissRejections={() => setProofRejected([])}
           />
         </div>
@@ -291,11 +309,24 @@ export function NewInvestigationForm() {
               </div>
             )}
 
+            {errors.request && (
+              <p
+                id="request-error"
+                ref={requestErrorRef}
+                tabIndex={-1}
+                role="alert"
+                className="flex items-start gap-2 text-sm text-destructive outline-none"
+              >
+                <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden />
+                {errors.request}
+              </p>
+            )}
+
             <div className="flex flex-col-reverse items-stretch justify-between gap-4 border-t border-border pt-5 sm:flex-row sm:items-center">
               <p className="text-sm text-muted-foreground" aria-live="polite">
                 {fileCount === 0
                   ? "Add files to both areas to start."
-                  : summaryLine(claims.length, audioCount, proof.length)}
+                  : summaryLine(claims.length, audioCount, proof.length, requestBytes([...claims, ...proof]))}
               </p>
               <Button
                 type="submit"
@@ -325,12 +356,16 @@ function plural(count: number, one: string, many: string) {
   return `${count} ${count === 1 ? one : many}`
 }
 
-function summaryLine(claims: number, audio: number, proof: number) {
+function summaryLine(claims: number, audio: number, proof: number, bytes: number) {
   const parts = [
     `What they said: ${plural(claims, "file", "files")}`,
     `Proof: ${plural(proof, "file", "files")}`,
   ]
   if (audio > 0) parts.push(`${plural(audio, "recording", "recordings")} to transcribe`)
+  parts.push(
+    `${claims + proof} of ${MAX_FILES} files`,
+    `${formatBytes(bytes)} of ${formatBytes(MAX_REQUEST_BYTES)}`
+  )
   return parts.join(" · ")
 }
 

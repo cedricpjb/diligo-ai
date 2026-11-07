@@ -21,10 +21,16 @@ export function ResultsView() {
 
   if (state.status === "loading") return <ResultsSkeleton />
   if (state.status === "empty") return <EmptyResults />
-  return <Results investigation={state.investigation} />
+  return <Results investigation={state.investigation} persisted={state.persisted} />
 }
 
-function Results({ investigation }: { investigation: StoredInvestigation }) {
+function Results({
+  investigation,
+  persisted,
+}: {
+  investigation: StoredInvestigation
+  persisted: boolean
+}) {
   const { response } = investigation
   const findings = useMemo(() => sortFindings(response.findings), [response.findings])
   const summary = useMemo(() => summarize(response.findings), [response.findings])
@@ -97,12 +103,19 @@ function Results({ investigation }: { investigation: StoredInvestigation }) {
         </Button>
       </header>
 
-      {(investigation.sample || summary.mockedCount > 0 || exportState.status !== "idle") && (
+      {(investigation.sample || !persisted || summary.mockedCount > 0 || exportState.status !== "idle") && (
         <div className="flex flex-col gap-3" aria-label="Notices">
           {investigation.sample && (
             <Notice>
               <strong className="font-medium text-foreground">Sample data.</strong> No API URL is
               set, so these are the starter case’s findings, not an analysis of the files you added.
+            </Notice>
+          )}
+          {!persisted && (
+            <Notice>
+              <strong className="font-medium text-foreground">This result is not saved.</strong> The
+              browser would not store it, so it stays only until you reload or close this tab. Export
+              it to Excel if you need to keep it.
             </Notice>
           )}
           {summary.mockedCount > 0 && (

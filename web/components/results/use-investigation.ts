@@ -2,41 +2,52 @@
 
 import { useMemo, useSyncExternalStore } from "react"
 
-import { INVESTIGATION_KEY, type StoredInvestigation } from "@/lib/investigation-store"
+import {
+  getLatest,
+  readStoredRaw,
+  subscribeLatest,
+  type StoredInvestigation,
+} from "@/lib/investigation-store"
 
-const subscribe = () => () => {}
+const subscribeNever = () => () => {}
 
 export type InvestigationState =
   | { status: "loading" }
   | { status: "empty" }
-  | { status: "ready"; investigation: StoredInvestigation }
+  | {
+      status: "ready"
+      investigation: StoredInvestigation
+      /** False when the result lives only in memory because the browser would not store it. */
+      persisted: boolean
+    }
 
 /**
- * Reads the latest investigation from sessionStorage without a setState-in-effect.
- * The server render and the first client render are "loading", so nothing flashes.
+ * The newest investigation: the in-memory copy if this page session made one, otherwise
+ * the copy in sessionStorage (after a reload). The server render and the first client
+ * render are "loading", so nothing flashes.
  */
 export function useInvestigation(): InvestigationState {
   const hydrated = useSyncExternalStore(
-    subscribe,
+    subscribeNever,
     () => true,
     () => false
   )
-  const raw = useSyncExternalStore(
-    subscribe,
-    () => sessionStorage.getItem(INVESTIGATION_KEY),
-    () => null
-  )
+  const memory = useSyncExternalStore(subscribeLatest, getLatest, () => null)
+  const raw = useSyncExternalStore(subscribeNever, readStoredRaw, () => null)
 
   return useMemo<InvestigationState>(() => {
     if (!hydrated) return { status: "loading" }
+    if (memory) {
+      return { status: "ready", investigation: memory.investigation, persisted: memory.persisted }
+    }
     if (!raw) return { status: "empty" }
     try {
       const parsed = JSON.parse(raw) as StoredInvestigation
       return Array.isArray(parsed?.response?.findings)
-        ? { status: "ready", investigation: parsed }
+        ? { status: "ready", investigation: parsed, persisted: true }
         : { status: "empty" }
     } catch {
       return { status: "empty" }
     }
-  }, [hydrated, raw])
+  }, [hydrated, memory, raw])
 }

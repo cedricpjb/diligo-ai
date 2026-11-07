@@ -11,6 +11,7 @@ import {
 } from "lucide-react"
 
 import {
+  MAX_FILE_BYTES,
   acceptAttribute,
   extensionOf,
   formatBytes,
@@ -146,7 +147,7 @@ export function FileDropzone({
             </span>
           </span>
           <span id={hintId} className="text-xs text-muted-foreground">
-            {rules.typesLabel}
+            {rules.typesLabel} · up to {formatBytes(MAX_FILE_BYTES)} each
           </span>
         </button>
         <input

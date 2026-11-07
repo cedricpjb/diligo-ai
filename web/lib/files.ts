@@ -1,4 +1,12 @@
-// File rules for the two upload areas. Allowed types come from docs/API.md.
+// File rules for the two upload areas.
+//
+// Types come from docs/API.md. The limits match the backend (api/src/uploads.ts,
+// api/src/app.ts), so a problem shows here, before submitting, instead of as a
+// server error afterwards:
+//   - 15 MiB per file (audio too), and no empty files
+//   - 25 MiB for the whole request
+//   - at most 20 files, counted across both areas
+//   - file names unique across both areas
 
 export type FileKind = "pdf" | "txt" | "csv" | "audio"
 
@@ -20,9 +28,13 @@ export interface ZoneRules {
   typesLabel: string
 }
 
-// The contract sets no size limit. These stop obvious mistakes in the browser.
-export const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
-export const MAX_AUDIO_BYTES = 200 * 1024 * 1024
+export const MAX_FILE_BYTES = 15 * 1024 * 1024
+export const MAX_REQUEST_BYTES = 25 * 1024 * 1024
+export const MAX_FILES = 20
+export const MAX_NAME_LENGTH = 200
+
+/** Each file travels with part headers and boundaries, which count toward the request limit. */
+const PART_OVERHEAD_BYTES = 1024
 
 const AUDIO = ["mp3", "wav", "m4a"]
 
@@ -53,7 +65,43 @@ export function acceptAttribute(rules: ZoneRules): string {
   return rules.extensions.map((ext) => `.${ext}`).join(",")
 }
 
-/** Splits picked files into accepted items and rejections with a plain reason. */
+/** What the request will weigh: file bytes plus the multipart overhead of each part. */
+export function requestBytes(items: UploadItem[]): number {
+  return items.reduce((sum, item) => sum + item.file.size + PART_OVERHEAD_BYTES, 0)
+}
+
+/**
+ * Why `file` cannot join `current` (every file already chosen, in both areas), or null.
+ * Type is checked per area elsewhere; these are the limits shared by the whole request.
+ */
+function limitProblem(file: File, current: UploadItem[]): string | null {
+  if (/[\\/\u0000-\u001f]/.test(file.name)) {
+    return "The file name has a slash or a control character. Rename it and add it again."
+  }
+  if (file.name.length > MAX_NAME_LENGTH) {
+    return `The file name is longer than ${MAX_NAME_LENGTH} characters. Rename it and add it again.`
+  }
+  if (file.size === 0) return "This file is empty. Choose a copy that has content."
+  if (file.size > MAX_FILE_BYTES) {
+    return `This file is ${formatBytes(file.size)}. The limit is ${formatBytes(MAX_FILE_BYTES)} per file, so split or compress it.`
+  }
+  if (current.some((item) => item.file.name === file.name)) {
+    return "A file with this name is already added. File names must be unique across both areas, so rename one."
+  }
+  if (current.length >= MAX_FILES) {
+    return `At most ${MAX_FILES} files are allowed across both areas. Remove one to add this.`
+  }
+  const total = requestBytes(current) + file.size + PART_OVERHEAD_BYTES
+  if (total > MAX_REQUEST_BYTES) {
+    return `Adding this file would take the upload to ${formatBytes(total)}. The limit is ${formatBytes(MAX_REQUEST_BYTES)} for all files together.`
+  }
+  return null
+}
+
+/**
+ * Splits picked files into accepted items and rejections with a plain reason.
+ * `existing` is every file already chosen in both areas, because the limits are shared.
+ */
 export function screenFiles(
   incoming: File[],
   existing: UploadItem[],
@@ -61,56 +109,46 @@ export function screenFiles(
 ): { accepted: UploadItem[]; rejected: Rejection[] } {
   const accepted: UploadItem[] = []
   const rejected: Rejection[] = []
-  const seen = new Set(existing.map((item) => fileKey(item.file)))
 
   for (const file of incoming) {
     const ext = extensionOf(file.name)
-    if (!rules.extensions.includes(ext)) {
-      rejected.push({
-        name: file.name,
-        reason: ext
-          ? `.${ext} files are not accepted here. Use ${rules.typesLabel}.`
-          : `This file has no extension. Use ${rules.typesLabel}.`,
-      })
+    const problem = !rules.extensions.includes(ext)
+      ? ext
+        ? `.${ext} files are not accepted here. Use ${rules.typesLabel}.`
+        : `This file has no extension. Use ${rules.typesLabel}.`
+      : limitProblem(file, [...existing, ...accepted])
+
+    if (problem) {
+      rejected.push({ name: file.name, reason: problem })
       continue
     }
-    if (file.size === 0) {
-      rejected.push({ name: file.name, reason: "This file is empty. Choose the saved copy with content." })
-      continue
-    }
-    const kind = kindOf(file.name)
-    const limit = kind === "audio" ? MAX_AUDIO_BYTES : MAX_DOCUMENT_BYTES
-    if (file.size > limit) {
-      rejected.push({
-        name: file.name,
-        reason: `This file is ${formatBytes(file.size)}. The limit is ${formatBytes(limit)}, so split or compress it.`,
-      })
-      continue
-    }
-    const key = fileKey(file)
-    if (seen.has(key)) {
-      rejected.push({ name: file.name, reason: "This file is already in the list, so it was skipped." })
-      continue
-    }
-    seen.add(key)
-    accepted.push({ id: `${key}:${crypto.randomUUID()}`, file, kind })
+    accepted.push({ id: `${file.name}:${crypto.randomUUID()}`, file, kind: kindOf(file.name) })
   }
 
   return { accepted, rejected }
 }
 
-function fileKey(file: File): string {
-  return `${file.name}:${file.size}:${file.lastModified}`
+/** The same limits, checked once more over everything about to be sent. Null when it is fine. */
+export function requestError(items: UploadItem[]): string | null {
+  const checked: UploadItem[] = []
+  for (const item of items) {
+    const problem = limitProblem(item.file, checked)
+    if (problem) return `${item.file.name}: ${problem}`
+    checked.push(item)
+  }
+  return null
 }
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
-  const units = ["KB", "MB", "GB"]
+  const units = ["KiB", "MiB", "GiB"]
   let value = bytes / 1024
   let unit = 0
   while (value >= 1024 && unit < units.length - 1) {
     value /= 1024
     unit++
   }
-  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`
+  // Round up, so a file one byte over a limit never reads as exactly the limit.
+  const rounded = Math.ceil(value * 10) / 10
+  return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)} ${units[unit]}`
 }

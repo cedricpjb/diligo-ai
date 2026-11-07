@@ -10,7 +10,7 @@ import { extractClaims, normalizePeriod } from '../src/extract.js';
 import { createJev, type Jev, type Transport } from '../src/jev.js';
 import { compareMoney, decimal, parseMoney } from '../src/money.js';
 import { createTranscriber } from '../src/transcribe.js';
-import type { CheckResponse, SourceText } from '../src/types.js';
+import type { CheckResponse, Segment, SourceText } from '../src/types.js';
 
 // Block real external calls even on a developer machine with installed keys.
 const nativeFetch = globalThis.fetch;
@@ -23,6 +23,84 @@ const source = (text: string, name = 'source.txt'): SourceText => ({ text, name,
 const neverJev: Jev = { async ask() { assert.fail('Numeric claims or missing evidence must not call Jev.'); } };
 const check = (claim: string, proof: string, jev = neverJev) => checkClaims([source(claim, 'claims.txt')], [source(proof, 'proof.txt')], jev);
 const fixture = JSON.parse(await readFile(new URL('../../../docs/mock-response.json', import.meta.url), 'utf8')) as CheckResponse;
+
+function assertObject(value: unknown, keys: string[]): asserts value is Record<string, unknown> {
+  assert.ok(value !== null && typeof value === 'object' && !Array.isArray(value));
+  assert.deepEqual(Object.keys(value).sort(), [...keys].sort());
+}
+function assertNumber(value: unknown): asserts value is number {
+  assert.equal(typeof value, 'number');
+  assert.ok(Number.isFinite(value));
+}
+function assertNullableString(value: unknown): void {
+  assert.ok(value === null || typeof value === 'string');
+}
+function assertResponse(value: unknown): asserts value is CheckResponse {
+  assertObject(value, ['company', 'period', 'findings', 'sources', 'transcript']);
+  assert.equal(typeof value.company, 'string');
+  assert.equal(typeof value.period, 'string');
+  assert.ok(Array.isArray(value.sources));
+  const sourceNames = new Set<string>();
+  for (const entry of value.sources) {
+    assertObject(entry, ['name', 'type', 'date', 'url']);
+    assert.equal(typeof entry.name, 'string');
+    assert.ok(entry.type === 'upload' || entry.type === 'sec');
+    assertNullableString(entry.date);
+    assertNullableString(entry.url);
+    sourceNames.add(entry.name as string);
+  }
+  assert.ok(Array.isArray(value.findings));
+  for (const finding of value.findings) {
+    assertObject(finding, ['id', 'claim', 'claim_source', 'label', 'decision', 'jev_probability',
+      'explanation', 'proof_source', 'claimed_usd', 'proof_usd', 'gap_usd', 'gap_pct',
+      'priority', 'next_action', 'mocked']);
+    for (const field of ['id', 'claim', 'explanation', 'next_action']) assert.equal(typeof finding[field], 'string', field);
+    assert.ok(finding.decision === 'YES' || finding.decision === 'NO' || finding.decision === 'NEEDS_REVIEW');
+    assert.equal(finding.label, { YES: 'supported', NO: 'discrepancy', NEEDS_REVIEW: 'insufficient' }[finding.decision]);
+    assert.ok(finding.priority === 'high' || finding.priority === 'medium' || finding.priority === 'low');
+    assert.equal(typeof finding.mocked, 'boolean');
+    if (finding.jev_probability !== null) {
+      assertNumber(finding.jev_probability);
+      assert.ok(finding.jev_probability >= 0 && finding.jev_probability <= 1);
+    }
+    for (const field of ['claimed_usd', 'proof_usd', 'gap_usd', 'gap_pct']) {
+      const amount: unknown = finding[field];
+      if (amount !== null) {
+        assert.equal(typeof amount, 'string', field);
+        assert.match(amount as string, /^-?\d+\.\d{2}$/, field);
+      }
+    }
+    assertObject(finding.claim_source, ['name', 'quote', 'timestamp_start', 'timestamp_end', 'speaker']);
+    assert.equal(typeof finding.claim_source.name, 'string');
+    assert.equal(typeof finding.claim_source.quote, 'string');
+    assert.ok(sourceNames.has(finding.claim_source.name as string));
+    assertNullableString(finding.claim_source.speaker);
+    for (const field of ['timestamp_start', 'timestamp_end']) {
+      if (finding.claim_source[field] !== null) assertNumber(finding.claim_source[field]);
+    }
+    if (finding.proof_source !== null) {
+      assertObject(finding.proof_source, ['name', 'quote', 'url']);
+      assert.equal(typeof finding.proof_source.name, 'string');
+      assert.equal(typeof finding.proof_source.quote, 'string');
+      assertNullableString(finding.proof_source.url);
+      assert.ok(sourceNames.has(finding.proof_source.name as string));
+    }
+  }
+  if (value.transcript !== null) {
+    assertObject(value.transcript, ['segments']);
+    assert.ok(Array.isArray(value.transcript.segments));
+    for (const segment of value.transcript.segments) {
+      assertObject(segment, ['source', 'start', 'end', 'speaker', 'text']);
+      assert.equal(typeof segment.source, 'string');
+      assert.ok(sourceNames.has(segment.source as string), 'Every segment must reference a sources entry.');
+      assertNumber(segment.start);
+      assertNumber(segment.end);
+      assert.ok(segment.start >= 0 && segment.end >= segment.start);
+      assertNullableString(segment.speaker);
+      assert.equal(typeof segment.text, 'string');
+    }
+  }
+}
 
 test('money: USD, suffixes, inherited units and large values use integer cents', () => {
   for (const text of ['USD 1,250,000', '$1.25M', '1,250 (in thousands)', '1.250 million']) assert.equal(parseMoney(text).cents, 125000000n);
@@ -45,6 +123,7 @@ test('starter: revenue, cash, debt and CT-102 reproduce docs/mock-response.json'
   const transcript = await createTranscriber().transcribe(new Blob(['mock audio']), 'management_call.m4a');
   const result = await checkClaims([{ name: 'management_call.m4a', text: transcript.segments.map(s => s.text).join('\n'), mocked: true, segments: transcript.segments }],
     [source('revenue,1175000.00\ncash,410000.00\ndebt,900000.00\nCT-101,signed\nCT-102,unsigned', 'finance_report.csv')], createJev());
+  assertResponse(result);
   for (const expected of fixture.findings) {
     const actual = result.findings.find(f => f.id === expected.id)!;
     assert.ok(actual, expected.id);
@@ -118,10 +197,23 @@ test('thresholds: inclusive boundaries live in checking code and are configurabl
   for (const value of [-1, 2, NaN, Infinity]) assert.throws(() => probabilityDecision(value));
   assert.throws(() => probabilityDecision(0.5, { yes: 0.2, no: 0.8 }));
 });
-test('contracts: every unsigned row is flagged even when Jev disagrees', async () => {
+test('contracts: deterministic unsigned status intentionally overrides Jev 0.99 and flags every unsigned row', async () => {
   const result = await check('contracts are signed', 'CT-101,signed\nCT-102,unsigned\nCT-103,unsigned', { async ask() { return { probability: 0.99, mocked: false }; } });
   assert.equal(result.findings[0]!.decision, 'NO'); assert.match(result.findings[0]!.explanation, /CT-102, CT-103/);
 });
+for (const probability of [0.20, 0.50, 0.80]) {
+  for (const [status, decision, label] of [['unsigned', 'NO', 'discrepancy'], ['pending', 'NEEDS_REVIEW', 'insufficient']] as const) {
+    test(`contracts: deterministic ${status === 'pending' ? 'unknown' : status} status overrides Jev ${probability.toFixed(2)}`, async () => {
+      const result = await check('contracts are signed', `CT-101,signed\nCT-102,${status}`,
+        { async ask() { return { probability, mocked: false }; } });
+      assertResponse(result);
+      const finding = result.findings[0]!;
+      assert.equal(finding.jev_probability, probability);
+      assert.equal(finding.decision, decision);
+      assert.equal(finding.label, label);
+    });
+  }
+}
 test('contracts: signed register uses Jev thresholds', async () => {
   for (const p of [0.2, 0.5, 0.8]) assert.equal((await check('contracts are signed', 'CT-101,signed', { async ask() { return { probability: p, mocked: false }; } })).findings[0]!.decision, probabilityDecision(p));
 });
@@ -204,19 +296,33 @@ function form(claims = 'Revenue USD 1250000.00\nCash USD 480000.00\nDebt USD 900
 test('HTTP: starter multipart, response shape, CORS and decimal strings', async () => withServer(async url => {
   const response = await fetch(url, { method: 'POST', body: form(), headers: { Origin: 'http://localhost:3000' } });
   assert.equal(response.status, 200); assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'http://localhost:3000');
-  const body = await response.json() as CheckResponse;
-  assert.deepEqual(Object.keys(body).sort(), Object.keys(fixture).sort()); assert.equal(body.transcript, null); assert.equal(body.findings.length, 4);
+  const body: unknown = await response.json();
+  assertResponse(body);
+  assert.equal(body.transcript, null); assert.equal(body.findings.length, 4);
   for (const finding of body.findings) {
-    assert.deepEqual(Object.keys(finding).sort(), Object.keys(fixture.findings[0]!).sort());
-    assert.equal(finding.claim_source.timestamp_start, null); assert.equal(finding.claim_source.speaker, null); assert.equal(finding.mocked, true);
-    assert.ok(typeof finding.gap_usd === 'string' || finding.gap_usd === null);
+    assert.equal(finding.claim_source.timestamp_start, null); assert.equal(finding.claim_source.timestamp_end, null);
+    assert.equal(finding.claim_source.speaker, null); assert.equal(finding.mocked, true);
+    const expected = fixture.findings.find(f => f.id === finding.id)!;
+    for (const field of ['claimed_usd', 'proof_usd', 'gap_usd', 'gap_pct'] as const) assert.equal(finding[field], expected[field], field);
   }
 }));
+test('HTTP: missing numeric and contract evidence leaves evidence fields null without Jev', async () => withServer(async url => {
+  const body = form('Revenue USD 100.00\ncontracts are signed');
+  body.set('proof_files', new Blob(['cash,100.00']), 'proof.csv');
+  const response = await fetch(url, { method: 'POST', body }); assert.equal(response.status, 200);
+  const result: unknown = await response.json(); assertResponse(result);
+  assert.equal(result.findings.length, 2); assert.equal(result.transcript, null);
+  for (const finding of result.findings) {
+    assert.equal(finding.decision, 'NEEDS_REVIEW'); assert.equal(finding.label, 'insufficient');
+    for (const field of ['proof_source', 'proof_usd', 'gap_usd', 'gap_pct', 'jev_probability'] as const) assert.equal(finding[field], null, field);
+    assert.equal(finding.claimed_usd, finding.id === 'f-revenue' ? '100.00' : null);
+  }
+}, { jev: neverJev }));
 test('HTTP: repeated claim files and optional ticker', async () => withServer(async url => {
   const body = form(); body.delete('claims_text'); body.set('ticker', 'DEMO');
   body.append('claims_files', new Blob(['Revenue USD 1250000.00']), 'claims1.txt'); body.append('claims_files', new Blob(['Cash USD 480000.00']), 'claims2.txt');
   const response = await fetch(url, { method: 'POST', body }); assert.equal(response.status, 200);
-  const result = await response.json() as CheckResponse;
+  const result: unknown = await response.json(); assertResponse(result);
   assert.equal(result.company, 'DEMO'); assert.equal(result.findings.length, 2); assert.equal(result.sources.length, 3);
 }));
 function textPdf(): Uint8Array {
@@ -233,20 +339,32 @@ function textPdf(): Uint8Array {
 test('HTTP: real text PDF extraction preserves evidence quotes on Node 22', async () => withServer(async url => {
   const body = form(); body.delete('claims_text'); body.append('claims_files', new Blob([textPdf() as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }), 'claims.pdf');
   const response = await fetch(url, { method: 'POST', body }); assert.equal(response.status, 200);
-  const result = await response.json() as CheckResponse;
+  const result: unknown = await response.json(); assertResponse(result);
   assert.equal(result.findings[0]!.claim_source.quote, 'Revenue USD 1250000.00');
   assert.equal(result.findings[0]!.gap_usd, '75000.00');
 }));
 test('HTTP: repeated audio preserves transcript source, timestamps and mock flags', async () => withServer(async url => {
   const body = form(); body.delete('claims_text'); body.append('claims_audio', new Blob(['audio']), 'one.mp3'); body.append('claims_audio', new Blob(['audio']), 'two.wav');
   const response = await fetch(url, { method: 'POST', body }); assert.equal(response.status, 200);
-  const result = await response.json() as CheckResponse;
+  const result: unknown = await response.json(); assertResponse(result);
   assert.equal(result.findings.length, 8); assert.equal(result.transcript!.segments.length, 6);
   for (const finding of result.findings) {
-    const segment = result.transcript!.segments.find(s => s.source === finding.claim_source.name && s.text.includes(finding.claim_source.quote));
-    assert.ok(segment); assert.equal(finding.claim_source.timestamp_start, segment.start); assert.equal(finding.mocked, true);
+    const segment: Segment | undefined = result.transcript!.segments.find(s => s.source === finding.claim_source.name && s.text.includes(finding.claim_source.quote));
+    assert.ok(segment); assert.equal(finding.claim_source.timestamp_start, segment.start);
+    assert.equal(finding.claim_source.timestamp_end, segment.end); assert.equal(finding.claim_source.speaker, segment.speaker);
+    assert.equal(finding.mocked, true);
   }
 }));
+test('HTTP: audio with an unknown speaker keeps numeric timestamps and null speaker labels', async () => withServer(async url => {
+  const body = form(); body.delete('claims_text'); body.append('claims_audio', new Blob(['audio']), 'unknown.wav');
+  const response = await fetch(url, { method: 'POST', body }); assert.equal(response.status, 200);
+  const result: unknown = await response.json(); assertResponse(result);
+  assert.equal(result.findings.length, 1);
+  assert.deepEqual(result.transcript, { segments: [{ source: 'unknown.wav', start: 0, end: 2, speaker: null, text: 'Revenue USD 1250000.00' }] });
+  assert.deepEqual(result.findings[0]!.claim_source, { name: 'unknown.wav', quote: 'Revenue USD 1250000.00', timestamp_start: 0, timestamp_end: 2, speaker: null });
+}, { jev: neverJev, transcriber: { async transcribe(_audio, name) {
+  return { segments: [{ source: name, start: 0, end: 2, speaker: null, text: 'Revenue USD 1250000.00' }], mocked: false };
+} } }));
 test('HTTP: CORS preflight and unrelated origin', async () => withServer(async url => {
   const preflight = await fetch(url, { method: 'OPTIONS', headers: { Origin: 'http://localhost:3000' } });
   assert.equal(preflight.status, 204); assert.match(preflight.headers.get('Access-Control-Allow-Methods')!, /POST/);

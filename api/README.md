@@ -93,7 +93,8 @@ local credentials, and never makes a paid API call.
 
 All money is `bigint` cents, including parsing, scaling, gaps, comparison,
 rounding, and ranking. JSON money and percentages are decimal strings.
-The contract leaves these details unspecified; this implementation uses:
+The implementation follows the contract's deterministic decision precedence and
+uses these conventions for details that it leaves unspecified:
 
 1. **Rounding:** the final displayed digit defines precision. `$1.25M` rounds
    evidence to USD 10,000; `USD 1250000.00` compares cents; an integer dollar claim
@@ -107,8 +108,8 @@ The contract leaves these details unspecified; this implementation uses:
    high, NEEDS_REVIEW medium, YES low. Equal scores retain extraction order.
 4. **Registers versus Jev:** explicit unsigned entries are deterministic
    counterexamples and force NO even if Jev disagrees. Unknown register statuses
-   require review. Otherwise thresholds determine the decision. The observed Jev
-   probability is retained; the mock uses illustrative `0.04` for unsigned and
+   require review. Only text claims without a deterministic decision use thresholds.
+   The observed Jev probability is retained; the mock uses illustrative `0.04` for unsigned and
    `0.96` for signed evidence. No matching evidence means NEEDS_REVIEW without Jev.
 5. **Quotes:** every claim/proof quote is checked by exact substring membership in
    the named original text or transcript. Invalid quotes force NEEDS_REVIEW and
@@ -116,9 +117,9 @@ The contract leaves these details unspecified; this implementation uses:
    parser's extracted text. Uploaded instructions are always treated as data.
 
 The API contract also does not define company/period fallback metadata, upload
-limits, unsupported-language behavior, register column schemas, or the precedence
-of explicit register contradictions over Jev. The choices above are documented
-here without changing the shared contract.
+limits, unsupported-language behavior, or register column schemas. Those choices
+are documented here; deterministic decision precedence is defined in the shared
+contract.
 
 ## Service references and remaining limits
 

@@ -43,19 +43,18 @@ loads keys into the frontend. Available names:
 - `ELEVENLABS_API_KEY`: absent/blank selects the explicitly mocked starter-call
   transcript for each uploaded audio file. This demo transcript does **not**
   describe the actual audio; findings derived from it are marked mocked.
-- `ANTHROPIC_API_KEY`: reserved for the later Claude implementation. This stage
-  uses `extractClaims` and deterministic explanation templates even if a key is
-  present. The templates stand in for the reasoning service, so **all current
-  findings have `mocked: true`**. Numeric decisions and amounts are still computed
-  from the uploaded evidence. This differs intentionally from the static fixture's
-  numeric mock flags, which assume real reasoning/transcription.
+- `ANTHROPIC_API_KEY`: enables Claude claim extraction and short explanations.
+  Without it, the original regex extractor and deterministic explanations remain
+  active, and findings have `mocked: true`. Supply a workspace-scoped API key.
 - `JEV_YES_THRESHOLD` / `JEV_NO_THRESHOLD` (defaults `0.80` / `0.20`), finite values
   in `[0, 1]`, with NO strictly below YES. These thresholds are unvalidated.
 
 No keys or document contents are logged. Uploads stay in memory; no source files
 are written to disk. Upstream exceptions are replaced with generic errors.
-With a configured service key, request failures return 500; they never silently
-become fabricated successful results. Service modules accept injected transports
+Jev and ElevenLabs request failures return 500. Claude invalid JSON, invalid schema,
+truncated output, or upstream failures retry once and then fall back to the regex
+extractor (or deterministic explanation), explicitly marked `mocked: true`.
+An extraction fallback marks every finding in that check as mocked. Service modules accept injected transports
 for offline testing. The test suite blocks all real external fetches, never reads
 local credentials, and never makes a paid API call.
 
@@ -63,10 +62,17 @@ local credentials, and never makes a paid API call.
 
 - Claim text, UTF-8 `.txt`, extractable-text `.pdf`, and `.mp3` / `.wav` / `.m4a`
   audio. Proof files accept UTF-8 `.txt`, `.csv`, and text `.pdf`.
-- Regex extraction recognizes revenue, cash (including cash on hand), debt
-  (including total debt), and affirmative `contracts are signed` claims. The
-  single `extractClaims(source)` boundary is ready to replace with Claude later.
-  Unsupported prose is not interpreted. No recognized claims returns 400.
+- Claude extraction accepts arbitrary pitch, memo, and transcript prose and returns
+  a strict Zod-validated list of money, text, and contract claims. Money metadata
+  retains the stated amount, unit, and period as strings; code alone parses money.
+  Missing source quotes are dropped before checking and logged only as
+  `{ dropped_claims: N }` (no text, filenames, or keys). No retained claims returns 400.
+  The fallback regex recognizes revenue, cash, debt, and signed-contract claims.
+- Numeric proof matching remains limited to revenue, cash, and debt. Other money
+  claims remain NEEDS_REVIEW rather than allowing the model to calculate or decide.
+  General text/contract evidence uses conservative line-level word overlap (at
+  least two informative words, a unique best passage); Jev handles the decision.
+  Ambiguous or absent evidence remains NEEDS_REVIEW. This is not semantic retrieval.
 - USD amounts with commas, decimals, K/M/B or thousand/million/billion suffixes,
   `(in thousands)` and equivalent units, or a preceding unit heading.
 - Finance CSV rows use `metric,amount[,period]`; quote amounts containing commas.
@@ -111,9 +117,9 @@ uses these conventions for details that it leaves unspecified:
    require review. Only text claims without a deterministic decision use thresholds.
    The observed Jev probability is retained; the mock uses illustrative `0.04` for unsigned and
    `0.96` for signed evidence. No matching evidence means NEEDS_REVIEW without Jev.
-5. **Quotes:** every claim/proof quote is checked by exact substring membership in
-   the named original text or transcript. Invalid quotes force NEEDS_REVIEW and
-   `insufficient`, regardless of an earlier decision. PDF source text means the
+5. **Quotes:** every Claude claim quote is checked by exact substring membership
+   in the uploaded source or transcript; invalid claims are dropped. Proof quotes
+   are selected by code and checked again before returning findings. PDF source text means the
    parser's extracted text. Uploaded instructions are always treated as data.
 
 The API contract also does not define company/period fallback metadata, upload
@@ -133,7 +139,22 @@ Real clients follow the official documentation read before implementation:
   multipart audio to `/v1/speech-to-text`, `scribe_v2`, diarization and word timing;
   source-preserving segments grouped by speaker. No browser calls these services.
 
-Live vendor calls have not been exercised. Claude extraction/explanations, OCR,
+- [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create)
+  and [thinking controls](https://platform.claude.com/docs/en/build-with-claude/thinking):
+  `claude-sonnet-5-5`, API version `2026-10-21`, low effort and `between_tools`
+  (no tools, so no up-front thinking). Extraction is capped at 4096 output tokens;
+  each explanation at 256. Both have a 30-second request timeout and one retry.
+  Only claim/proof quotes are sent for explanations, never totals, gaps, or decisions.
+  Uploaded text is explicitly untrusted data, not instructions. Explanations do not
+  affect computed findings. Long documents can exhaust the cap and use fallback;
+  chunking is not implemented. Model prose still requires human review.
+
+No API response fields were added. The contract has only per-finding `mocked`, not
+a run-level flag; extraction fallback propagates through those existing flags.
+It does not specify extraction schema, retry/token limits, or general passage
+retrieval; those internal policies are documented above.
+
+Live vendor calls have not been exercised. OCR,
 SEC retrieval, general financial-table parsing, fiscal calendars, currency
 conversion, and production authentication/rate limiting are not implemented.
 The server is intended for the local frontend and has no public deployment setup.

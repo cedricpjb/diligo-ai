@@ -3,6 +3,7 @@ import { checkClaims, type Thresholds } from './check.js';
 import { createJev, type Jev } from './jev.js';
 import { createTranscriber, type Transcriber } from './transcribe.js';
 import { BadInput, parseUploads } from './uploads.js';
+import type { Claude } from './claude.js';
 export const MAX_REQUEST_BYTES = 25 * 1024 * 1024;
 function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -21,7 +22,7 @@ function json(res: ServerResponse, status: number, value: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(value));
 }
-export function createApp(deps: { jev?: Jev; transcriber?: Transcriber; thresholds?: Thresholds } = {}) {
+export function createApp(deps: { jev?: Jev; transcriber?: Transcriber; thresholds?: Thresholds; claude?: Claude } = {}) {
   const jev = deps.jev ?? createJev();
   const transcriber = deps.transcriber ?? createTranscriber();
   return createServer({ requestTimeout: 150000, headersTimeout: 15000 }, async (req, res) => {
@@ -43,8 +44,8 @@ export function createApp(deps: { jev?: Jev; transcriber?: Transcriber; threshol
       try { form = await new Request('http://localhost/api/check', { method: 'POST', headers: { 'Content-Type': type }, body: new Uint8Array(body) }).formData(); }
       catch { throw new BadInput('Invalid multipart/form-data.'); }
       const { claims, proofs, ticker } = await parseUploads(form, transcriber);
-      const result = await checkClaims(claims, proofs, jev, { ticker, thresholds: deps.thresholds });
-      if (!result.findings.length) throw new BadInput('No supported revenue, cash, debt, or signed-contract claims were found.');
+      const result = await checkClaims(claims, proofs, jev, { ticker, thresholds: deps.thresholds, claude: deps.claude });
+      if (!result.findings.length) throw new BadInput('No verifiable claims were found.');
       json(res, 200, result);
     } catch (error) {
       // Never echo upstream messages, keys, filenames, or uploaded text in errors/logs.

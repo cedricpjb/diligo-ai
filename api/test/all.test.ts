@@ -10,6 +10,8 @@ import { contractRows, extractClaims, normalizePeriod } from '../src/extract.js'
 import { createJev, type Jev, type Transport } from '../src/jev.js';
 import { compareMoney, decimal, parseMoney } from '../src/money.js';
 import { createTranscriber } from '../src/transcribe.js';
+import { createClaude } from '../src/claude.js';
+import { createClaimExtractor } from '../src/extract.js';
 import type { CheckResponse, Segment, SourceText } from '../src/types.js';
 
 // Block real external calls even on a developer machine with installed keys.
@@ -25,6 +27,180 @@ const check = (claim: string, proof: string, jev = neverJev) => checkClaims([sou
 const fixture = JSON.parse(await readFile(new URL('../../../docs/mock-response.json', import.meta.url), 'utf8')) as CheckResponse;
 // Verbatim excerpt from the starter kit's sample contract-register.txt.
 const starterRegisterLine = 'Target 01 contract register. CT-100 signed; CT-101 signed; CT-102 unsigned as of September 30, 2026.';
+
+function claudeStub(outputs: unknown[]) {
+  const requests: { model: string; max_tokens: number; system: string; messages: { role: string; content: string }[] }[] = [];
+  const transport: Transport = async (url, init) => {
+    assert.equal(url, 'https://api.anthropic.com/v1/messages');
+    assert.equal(new Headers(init?.headers).get('anthropic-version'), '2026-10-21');
+    assert.equal(init?.redirect, 'error');
+    assert.ok(init?.signal);
+    requests.push(JSON.parse(String(init?.body)));
+    const request = JSON.parse(String(init?.body));
+    assert.deepEqual(request.thinking, { type: 'between_tools' });
+    assert.deepEqual(request.output_config, { effort: 'low' });
+    const output = outputs.shift();
+    assert.notEqual(output, undefined, 'Unexpected Claude request');
+    return Response.json({ stop_reason: 'end_turn', content: [{ type: 'text', text: typeof output === 'string' ? output : JSON.stringify(output) }] });
+  };
+  return { claude: createClaude('test-only-placeholder', transport), requests };
+}
+
+test('Claude: unfamiliar prose extracts grounded money; code computes gaps; explanation sees only quotes', async () => {
+  const quote = 'In FY2025, we brought revenue to USD 1250000.00 through new channels.';
+  const { claude, requests } = claudeStub([
+    { claims: [{ type: 'money', quote, amount: '1250000.00', unit: 'USD', period: 'FY2025' }] },
+    { explanation: 'The claim and the finance report state different revenue amounts.' },
+  ]);
+  const result = await checkClaims([source(quote)], [source('FY2025\nrevenue,1175000.00', 'proof.csv')], neverJev, { claude });
+  assertResponse(result);
+  const finding = result.findings[0]!;
+  assert.equal(finding.gap_usd, '75000.00'); assert.equal(finding.gap_pct, '6.00');
+  assert.equal(finding.decision, 'NO'); assert.equal(finding.mocked, false);
+  assert.equal(finding.claim_source.quote, quote);
+  assert.equal(finding.explanation, 'The claim and the finance report state different revenue amounts.');
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every(request => request.model === 'claude-sonnet-5-5'));
+  assert.deepEqual(requests.map(request => request.max_tokens), [4096, 256]);
+  assert.deepEqual(JSON.parse(requests[1]!.messages[0]!.content), { claim_quote: quote, proof_quote: 'revenue,1175000.00' });
+});
+
+test('Claude: hallucinated quotes are dropped, counted without document text, and never replaced by regex', async () => {
+  const quote = 'Our product serves independent pharmacies.';
+  const { claude, requests } = claudeStub([{ claims: [
+    { type: 'text', quote }, { type: 'money', quote: 'Revenue USD 999.00', amount: '999.00', unit: 'USD', period: '' },
+    { type: 'text', quote: quote.toUpperCase() },
+  ] }]);
+  const notes: unknown[] = [];
+  const result = await createClaimExtractor(claude, note => notes.push(note))(source(quote));
+  assert.equal(result.mocked, false); assert.deepEqual(result.claims.map(claim => claim.quote), [quote]);
+  assert.deepEqual(notes, [{ dropped_claims: 2 }]); assert.equal(requests.length, 1);
+  const dropped = claudeStub([{ claims: [{ type: 'text', quote: 'invented' }] }]);
+  assert.deepEqual((await createClaimExtractor(dropped.claude, () => {})(source('Revenue USD 100.00'))).claims, []);
+});
+
+test('Claude: malformed JSON and invalid schemas retry once then fall back to regex', async () => {
+  for (const invalid of ['not JSON', { claims: [{ type: 'money', quote: 'Revenue USD 100.00', amount: 100, unit: 'USD', period: '' }] },
+    { claims: [{ type: 'text', quote: 'Revenue USD 100.00', citation: 'invented' }] }]) {
+    const { claude, requests } = claudeStub([invalid, invalid]);
+    const input = source('Revenue USD 100.00');
+    const result = await createClaimExtractor(claude)(input);
+    assert.equal(result.mocked, true); assert.deepEqual(result.claims, extractClaims(input));
+    assert.equal(requests.length, 2);
+  }
+  const { claude } = claudeStub(['bad', 'bad', { explanation: 'The two passages report the same revenue.' }]);
+  const result = await checkClaims([source('Revenue USD 100.00')], [source('revenue,100.00', 'proof.csv')], neverJev, { claude });
+  assert.equal(result.findings[0]!.mocked, true);
+  assert.equal(result.findings[0]!.decision, 'YES');
+});
+
+test('Claude: starter results remain identical with real-path extraction and mocked transport', async () => {
+  const input = source(await readFile(new URL('../../starter-claims.txt', import.meta.url), 'utf8'), 'claims.txt');
+  const proof = source(await readFile(new URL('../../starter-proof.csv', import.meta.url), 'utf8'), 'proof.csv');
+  const baseline = await checkClaims([input], [proof], createJev());
+  const claims = extractClaims(input).map(claim => claim.metric === 'contracts'
+    ? { type: 'contract', quote: claim.quote }
+    : { type: 'money', quote: claim.quote, amount: /\d+\.\d+/.exec(claim.quote)![0], unit: 'USD', period: '' });
+  const { claude } = claudeStub([{ claims }, ...claims.map(() => ({ explanation: 'The supplied passages describe the reported position.' }))]);
+  const actual = await checkClaims([input], [proof], createJev(), { claude });
+  assertResponse(actual);
+  const decisions = (result: CheckResponse) => result.findings.map(({ explanation, mocked, ...finding }) => finding);
+  assert.deepEqual(decisions(actual), decisions(baseline));
+  assert.equal(actual.findings.find(finding => finding.id === 'f-contracts')!.mocked, true);
+  assert.equal(actual.findings.find(finding => finding.id === 'f-revenue')!.mocked, false);
+});
+
+test('Claude: generic text uses code-selected proof and Jev; missing evidence never calls Jev', async () => {
+  const quote = 'The Boston office opened in May.';
+  const proof = 'The Boston office remains closed pending permits.';
+  const { claude } = claudeStub([{ claims: [{ type: 'text', quote }] }, { explanation: 'The claim says the office opened, but the proof says it remains closed.' }]);
+  const result = await checkClaims([source(quote)], [source(proof, 'proof.txt')], { async ask(state, question) {
+    assert.equal(state, proof); assert.ok(question.includes(quote)); return { probability: 0.1, mocked: false };
+  } }, { claude });
+  assert.equal(result.findings[0]!.decision, 'NO'); assert.equal(result.findings[0]!.mocked, false);
+  assert.equal(result.findings[0]!.proof_source!.quote, proof);
+  const missing = claudeStub([{ claims: [{ type: 'text', quote }] }, { explanation: 'Matching evidence is unavailable.' }]);
+  const review = await checkClaims([source(quote)], [source('Unrelated evidence.', 'proof.txt')], neverJev, { claude: missing.claude });
+  assert.equal(review.findings[0]!.decision, 'NEEDS_REVIEW');
+  assert.equal(review.findings[0]!.proof_source, null);
+});
+
+test('Claude: metadata cannot invent money; omitted suffixes are parsed from the source', async () => {
+  for (const [quote, amount, unit, expected] of [
+    ['Revenue reached USD 1.25 million.', '1.25', 'USD', 125000000n],
+    ['Revenue reached USD 1.25 million.', '1.25', 'million USD', 125000000n],
+    ['Revenue reached USD 1.25 million.', '1', 'USD', null],
+    ['Revenue reached USD 1.25 million.', '999.00', 'USD', null],
+    ['Revenue reached EUR 100.00.', '100.00', '', null],
+  ] as const) {
+    const { claude } = claudeStub([{ claims: [{ type: 'money', quote, amount, unit, period: '' }] }]);
+    const result = await createClaimExtractor(claude, () => {})(source(quote));
+    assert.equal(result.claims[0]!.money?.cents ?? null, expected);
+  }
+  const mixed = claudeStub([{ claims: [{ type: 'money', quote: 'Revenue USD 100.00', amount: '100.00', unit: 'USD', period: '' }] }]);
+  assert.equal((await createClaimExtractor(mixed.claude, () => {})(source('Revenue EUR 90.00\nRevenue USD 100.00'))).claims[0]!.money?.cents, 10000n);
+  const foreignHeading = claudeStub([{ claims: [{ type: 'money', quote: 'Revenue 100.00', amount: '100.00', unit: '', period: '' }] }]);
+  assert.equal((await createClaimExtractor(foreignHeading.claude, () => {})(source('Currency: EUR\nRevenue 100.00'))).claims[0]!.money, null);
+});
+
+test('Claude: explanation failures preserve deterministic findings and mark mocks', async () => {
+  const quote = 'Revenue USD 100.00';
+  const { claude, requests } = claudeStub([{ claims: [{ type: 'money', quote, amount: '100.00', unit: 'USD', period: '' }] }, 'bad', { explanation: 42 }]);
+  const result = await checkClaims([source(quote)], [source('revenue,90.00', 'proof.csv')], neverJev, { claude });
+  assert.equal(result.findings[0]!.mocked, true); assert.equal(result.findings[0]!.gap_usd, '10.00');
+  assert.equal(result.findings[0]!.explanation, 'The proof amount differs from the claim after normalizing units and periods.');
+  assert.equal(requests.length, 3);
+});
+
+test('Claude: one invalid response can recover; missing key never calls transport', async () => {
+  const quote = 'We opened an office in Boston.';
+  const { claude, requests } = claudeStub(['bad', { claims: [{ type: 'text', quote }] }]);
+  assert.equal((await createClaimExtractor(claude, () => {})(source(quote))).mocked, false);
+  assert.equal(requests.length, 2);
+  const noKey = createClaude(undefined, async () => assert.fail('No-key mode must not call Claude'));
+  const input = source('Cash USD 480000.00');
+  assert.deepEqual(await createClaimExtractor(noKey)(input), { claims: extractClaims(input), mocked: true });
+});
+
+test('Claude: truncation, refusal and upstream errors fall back after exactly two attempts', async () => {
+  const input = source('Revenue USD 100.00');
+  for (const failure of ['truncated', 'refusal', 'http', 'network']) {
+    let calls = 0;
+    const claude = createClaude('test-only-placeholder', async () => {
+      calls++;
+      if (failure === 'network') throw new Error('private upstream content');
+      if (failure === 'http') return new Response('private upstream content', { status: 429 });
+      return Response.json({ stop_reason: failure === 'truncated' ? 'max_tokens' : 'refusal',
+        content: [{ type: 'text', text: '{"claims":[]}' }] });
+    });
+    assert.deepEqual(await createClaimExtractor(claude)(input), { claims: extractClaims(input), mocked: true });
+    assert.equal(calls, 2);
+  }
+});
+
+test('Claude: repeated transcript quotes retain distinct segment provenance', async () => {
+  const quote = 'Revenue USD 100.00';
+  const segments: Segment[] = [
+    { source: 'call.wav', text: quote, start: 0, end: 2, speaker: 'A' },
+    { source: 'call.wav', text: quote, start: 5, end: 7, speaker: 'B' },
+  ];
+  const claim = { type: 'money', quote, amount: '100.00', unit: 'USD', period: '' };
+  const { claude } = claudeStub([{ claims: [claim, claim] },
+    { explanation: 'The amounts match.' }, { explanation: 'The amounts match.' }]);
+  const result = await checkClaims([{ ...source(`${quote}\n${quote}`, 'call.wav'), segments }],
+    [source('revenue,100.00', 'proof.csv')], neverJev, { claude });
+  assert.deepEqual(result.findings.map(finding => finding.claim_source.timestamp_start), [0, 5]);
+  assert.deepEqual(result.findings.map(finding => finding.claim_source.speaker), ['A', 'B']);
+});
+
+test('Claude: mixed-source fallback marks the whole check as mocked', async () => {
+  const first = source('Revenue USD 100.00', 'first.txt');
+  const second = source('Cash USD 50.00', 'second.txt');
+  const { claude } = claudeStub([{ explanation: 'The amounts match.' }, { explanation: 'The amounts match.' }]);
+  const result = await checkClaims([first, second], [source('revenue,100.00\ncash,50.00', 'proof.csv')], neverJev,
+    { claude, extractor: async input => ({ claims: extractClaims(input), mocked: input === second }) });
+  assert.ok(result.findings.every(finding => finding.mocked));
+});
 
 function assertObject(value: unknown, keys: string[]): asserts value is Record<string, unknown> {
   assert.ok(value !== null && typeof value === 'object' && !Array.isArray(value));
@@ -329,6 +505,23 @@ async function withServer(run: (url: string) => Promise<void>, deps: Parameters<
   try { await run(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/check`); }
   finally { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
 }
+test('HTTP: injected Claude handles new prose without changing response shape', async () => {
+  const quote = 'Revenue from our pilots reached USD 1250000.00 in FY2025.';
+  const { claude } = claudeStub([
+    { claims: [{ type: 'money', quote, amount: '1250000.00', unit: 'USD', period: 'FY2025' }] },
+    { explanation: 'The pilot revenue differs from the finance report amount.' },
+  ]);
+  await withServer(async url => {
+    const body = new FormData(); body.set('claims_text', quote);
+    body.append('proof_files', new Blob(['FY2025\nrevenue,1175000.00']), 'proof.csv');
+    const response = await fetch(url, { method: 'POST', body });
+    assert.equal(response.status, 200);
+    const result: unknown = await response.json(); assertResponse(result);
+    assert.equal(result.findings[0]!.claim_source.quote, quote);
+    assert.equal(result.findings[0]!.gap_usd, '75000.00');
+    assert.equal(result.findings[0]!.mocked, false);
+  }, { claude, jev: neverJev });
+});
 function form(claims = 'Revenue USD 1250000.00\nCash USD 480000.00\nDebt USD 900000.00\ncontracts are signed') {
   const body = new FormData(); body.set('claims_text', claims);
   body.append('proof_files', new Blob(['revenue,1175000.00\ncash,410000.00\ndebt,900000.00\nCT-102,unsigned']), 'proof.csv'); return body;

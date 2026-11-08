@@ -1,5 +1,74 @@
 import { AMOUNT_PATTERN, parseMoney, unitFromText } from './money.js';
 import type { Claim, Metric, SourceText } from './types.js';
+import { z } from 'zod';
+import type { Claude } from './claude.js';
+
+const quoteSchema = z.string().min(1).max(12000).regex(/\S/);
+const fieldSchema = z.string().max(128);
+export const claimsSchema = z.strictObject({ claims: z.array(z.discriminatedUnion('type', [
+  z.strictObject({ type: z.literal('money'), quote: quoteSchema, amount: fieldSchema.min(1), unit: fieldSchema, period: fieldSchema }),
+  z.strictObject({ type: z.literal('text'), quote: quoteSchema }),
+  z.strictObject({ type: z.literal('contract'), quote: quoteSchema }),
+])).max(100) });
+export interface Extraction { claims: Claim[]; mocked: boolean }
+export type ClaimExtractor = (source: SourceText) => Promise<Extraction>;
+export function createClaimExtractor(claude: Claude, log: (note: { dropped_claims: number }) => void = console.info): ClaimExtractor {
+  return async source => {
+    const result = await claude.json(claimsSchema,
+      'Extract every factual claim from this pitch, memo, or transcript. Copy each quote exactly, including whitespace and punctuation, as a contiguous source substring. Use type money, text, or contract. For money, copy the stated amount, unit/currency and period as text, never normalize or compute them. Use empty strings for unstated unit or period. Include sufficient context in the quote to identify the metric, amount, currency and period. Never invent a source or citation. Do not return commentary.',
+      { text: source.text }, 4096);
+    if (!result) return { claims: extractClaims(source), mocked: true };
+    const claims: Claim[] = [];
+    const offsets = new Map<string, number>();
+    let dropped = 0;
+    for (const item of result.claims) {
+      const offset = source.text.indexOf(item.quote, offsets.get(item.quote) ?? 0);
+      if (offset < 0) { dropped++; continue; }
+      offsets.set(item.quote, offset + item.quote.length);
+      let inheritedPeriod: string | null = null;
+      let inheritedScale = 1n;
+      let usd = true;
+      const headings: string[] = [];
+      for (const line of source.text.slice(0, offset).split(/\r?\n/)) {
+        if (!/\b(revenue|cash|debt|contracts?|CT-\d+)\b/i.test(line)) {
+          if (periodFromLine(line)) inheritedPeriod = periodFromLine(line);
+          if (unitFromText(line)) inheritedScale = unitFromText(line)!;
+          if (/^\s*(?:currency\s*:\s*)?(?:USD|EUR|GBP|CAD|JPY|AUD|CHF|CNY)\b/i.test(line)) usd = /\bUSD\b/i.test(line);
+          headings.push(line);
+        }
+      }
+      const context = [item.quote, ...headings].join('\n');
+      const claim: Claim = { metric: item.type === 'money' ? 'other-money' : item.type,
+        type: item.type, source, quote: item.quote, offset, money: null, period: periodFromLine(item.quote) ?? inheritedPeriod };
+      if (item.type === 'money') {
+        claim.stated = { amount: item.amount, unit: item.unit, period: item.period };
+        const metrics = [...new Set(item.quote.toLowerCase().match(/\b(?:revenue|cash|debt)\b/g))];
+        if (metrics.length === 1) claim.metric = metrics[0] as Metric;
+        const statedPeriod = item.period ? normalizePeriod(item.period) ?? 'AMBIGUOUS' : claim.period;
+        claim.period = claim.period && statedPeriod !== claim.period ? 'AMBIGUOUS' : statedPeriod;
+        const grounded = item.quote.includes(item.amount) && (!item.unit || item.unit.split(/\s+/).every(word => context.includes(word)))
+          && (!item.period || context.includes(item.period));
+        const unit = /^(?:(?:USD|US dollars?|dollars?|\$)\s*)?(?:(?:in\s+)?(thousands?|millions?|billions?|[KMB]))?(?:\s*(?:USD|US dollars?|dollars?))?$/i.exec(item.unit.trim());
+        const numericText = /[+-]?\d[\d,]*(?:\.\d+)?/.exec(item.amount)?.[0];
+        const amounts = [...item.quote.matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))]
+          .filter(match => /[+-]?\d[\d,]*(?:\.\d+)?/.exec(match[0])?.[0] === numericText
+            && !/^(?:[\d,]|\.\d|\w)/.test(item.quote.slice(match.index! + match[0].length)));
+        try {
+          if (grounded && unit && usd && amounts.length === 1 && !/\b(?:EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b|[\u20ac\u00a3\u00a5]/i.test(item.quote)) {
+            const scale = unit[1] ? parseMoney(`1 ${unit[1]}`).cents / 100n : inheritedScale;
+            claim.money = parseMoney(amounts[0]![0], scale);
+          }
+        } catch { }
+        if (!grounded) claim.period = 'AMBIGUOUS';
+      } else if (item.type === 'contract') {
+        if (/^\s*(?:all\s+)?(?:material\s+)?contracts\s+are\s+signed[.!]?\s*$/i.test(item.quote)) claim.metric = 'contracts';
+      }
+      claims.push(claim);
+    }
+    log({ dropped_claims: dropped });
+    return { claims, mocked: false };
+  };
+}
 
 const periodPattern = /\b(?:Q[1-4]\s*[-/]?\s*(?:FY\s*)?20\d{2}|(?:FY\s*)?20\d{2}\s*[-/]?\s*Q[1-4]|20\d{2}-\d{2}-\d{2}|(?:FY\s*|fiscal year\s*|year\s+)20\d{2})\b/gi;
 export function normalizePeriod(text: string): string | null {
@@ -35,8 +104,6 @@ function record(line: string): string[] | null {
   fields.push(field.trim());
   return fields;
 }
-// This is the single claim-extraction boundary for a future Claude implementation.
-// Match source substrings; never execute or follow instructions from documents.
 export function extractClaims(source: SourceText): Claim[] {
   const claims: Claim[] = [];
   let period: string | null = null;
@@ -133,4 +200,4 @@ export function contractRows(source: SourceText): ContractRow[] {
 export function samePeriod(left: string | null, right: string | null): boolean {
   return left !== 'AMBIGUOUS' && right !== 'AMBIGUOUS' && left === right;
 }
-export function isMetric(value: Claim['metric']): value is Metric { return value !== 'contracts'; }
+export function isMetric(value: Claim['metric']): value is Metric { return value === 'revenue' || value === 'cash' || value === 'debt'; }

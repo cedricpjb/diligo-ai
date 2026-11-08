@@ -47,7 +47,7 @@ const OTHER_SECTION = 'The claimed amount matches this metric in a different sec
 const ONLY_OTHER_SECTION = 'The only matching amounts for this metric and period are in a different section of the proof (for example a segment table) than the claim names, so they were not used.';
 const BASIS_MISMATCH = 'The only matching amounts for this metric and period are on a different reporting basis (managed versus reported) than the claim names, so they were not used.';
 const UNREADABLE_AMOUNT = 'The amount could not be read safely as US dollars, so it needs review.';
-const EXPLANATION_CONCURRENCY = 6;
+const EXPLANATION_CONCURRENCY = 3;
 function fixedExplanation(finding: Finding): string {
   const excerpt = (quote: string) => JSON.stringify(quote.length > 140 ? `${quote.slice(0, 137)}...` : quote);
   return `${finding.explanation} Claim: ${excerpt(finding.claim_source.quote)}${finding.proof_source ? ` Proof: ${excerpt(finding.proof_source.quote)}` : ''}`;

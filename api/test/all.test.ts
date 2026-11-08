@@ -12,7 +12,7 @@ import { compareMoney, containsMoney, decimal, parseMoney } from '../src/money.j
 import { createTranscriber } from '../src/transcribe.js';
 import { filingFigures, legacyFigures } from '../src/filing.js';
 import { createClaude, explainFinding } from '../src/claude.js';
-import { bareMoneyAmount, claimsSchema, createClaimExtractor, signedContractsAssertion, splitChunks, type ExtractionNote } from '../src/extract.js';
+import { bareMoneyAmount, claimSchema, claimsSchema, createClaimExtractor, signedContractsAssertion, splitChunks, type ExtractionNote } from '../src/extract.js';
 import type { CheckResponse, Segment, SourceText } from '../src/types.js';
 
 // Block real external calls even on a developer machine with installed keys.
@@ -82,8 +82,7 @@ test('Claude: hallucinated quotes are dropped, counted without document text, an
 });
 
 test('Claude: malformed JSON and invalid schemas retry once then fall back to regex', async () => {
-  for (const invalid of ['not JSON', { claims: [{ type: 'money', quote: 'Revenue USD 100.00', amount: 100, unit: 'USD', period: '' }] },
-    { claims: [{ type: 'text', quote: 'Revenue USD 100.00', citation: 'invented' }] }]) {
+  for (const invalid of ['not JSON', { claims: 'invalid' }, { missing: [] }]) {
     const { claude, requests } = claudeStub([invalid, invalid]);
     const input = source('Revenue USD 100.00');
     const result = await createClaimExtractor(claude)(input);
@@ -242,7 +241,7 @@ test('Claude: explanation failures preserve deterministic findings and mark mock
   assert.equal(requests.length, 3);
 });
 
-test('explanations: six workers preserve document order despite reversed completion and retry/fallback', async () => {
+test('explanations: three workers preserve document order despite reversed completion and retry/fallback', async () => {
   const quotes = Array.from({ length: 14 }, (_, index) => `Revenue USD 100.00 (statement ${index})`);
   const input = source(quotes.join('\n'));
   const pending: (() => void)[] = [];
@@ -271,14 +270,14 @@ test('explanations: six workers preserve document order despite reversed complet
   void promise.then(() => { settled = true; });
   for (let turns = 0; !settled && turns < 100; turns++) {
     await new Promise<void>(resolve => setImmediate(resolve));
-    assert.ok(active <= 6);
-    // Release later calls first; a serial implementation cannot reach peak six.
+    assert.ok(active <= 3);
+    // Release later calls first; a serial implementation cannot reach peak three.
     const batch = pending.splice(0).reverse();
     batch.forEach(release => release());
   }
   assert.ok(settled, 'all workers finish');
   const result = await promise;
-  assert.equal(peak, 6);
+  assert.equal(peak, 3);
   assert.notEqual(completed[0], quotes[0]);
   assert.deepEqual(result.findings.map(f => f.claim), quotes);
   assert.deepEqual(quotes.map(quote => attempts.get(quote)), [2, 2, ...Array(12).fill(1)]);
@@ -340,7 +339,7 @@ test('Claude: one invalid response can recover; missing key never calls transpor
   assert.deepEqual(await createClaimExtractor(noKey)(input), { claims: extractClaims(input), mocked: true });
 });
 
-test('Claude: truncation, refusal and upstream errors fall back after exactly two attempts', async () => {
+test('Claude: repeated truncation has bounded splits; refusal and upstream errors retry once', async () => {
   const input = source('Revenue USD 100.00');
   for (const failure of ['truncated', 'refusal', 'http', 'network']) {
     let calls = 0;
@@ -352,7 +351,7 @@ test('Claude: truncation, refusal and upstream errors fall back after exactly tw
         content: [{ type: 'text', text: '{"claims":[]}' }] });
     });
     assert.deepEqual(await createClaimExtractor(claude)(input), { claims: extractClaims(input), mocked: true });
-    assert.equal(calls, 2);
+    assert.equal(calls, failure === 'truncated' ? 7 : 2);
   }
 });
 
@@ -1309,11 +1308,11 @@ test('chunking: a long transcript is split on paragraph/speaker boundaries, read
   assert.deepEqual(failures, []);
 });
 
-test('chunking: a truncated chunk falls back to regex for that chunk only; only its findings are mocked; logs carry no text', async () => {
+test('chunking: a refused chunk falls back to regex for that chunk only; only its findings are mocked; logs carry no text', async () => {
   const chunks = splitChunks(longCall);
   const broken = chunks.findIndex(chunk => chunk.text.includes(turnQuote(3)));
   const { claude, requests, failures } = chunkClaude(text => text === chunks[broken]!.text
-    ? { stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"claims":[{"type":"money","quote":"Reven' }] } : { claims: quotesIn(text) });
+    ? { stop_reason: 'refusal', content: [{ type: 'text', text: '' }] } : { claims: quotesIn(text) });
   const notes: ExtractionNote[] = [];
   const result = await createClaimExtractor(claude, note => notes.push(note))(source(longCall, 'call.txt'));
   assert.equal(requests.length, chunks.length + 1, 'the failing chunk is retried once');
@@ -1322,7 +1321,7 @@ test('chunking: a truncated chunk falls back to regex for that chunk only; only 
   const fallbackQuotes = quotesIn(chunks[broken]!.text).map(claim => claim.quote);
   for (const claim of result.claims) assert.equal(claim.mocked === true, fallbackQuotes.includes(claim.quote), claim.quote);
   assert.deepEqual(failures, [1, 2].map(attempt => ({ event: 'claude_attempt_failed', label: `extract ${broken + 1}/${chunks.length}`, attempt,
-    reason: 'stop_reason', stop_reason: 'max_tokens' })));
+    reason: 'stop_reason', stop_reason: 'refusal' })));
   assert.equal(notes[0]!.failed_chunks, 1); assert.equal(notes[0]!.fallback_claims, fallbackQuotes.length);
   assert.ok(!/franchise|Revenue|placeholder/.test(JSON.stringify([failures, notes])), 'diagnostics never contain document text or keys');
   // Through the checker: only findings from the failed chunk are marked mocked.
@@ -1336,14 +1335,66 @@ test('chunking: a truncated chunk falls back to regex for that chunk only; only 
   assert.equal(whole.mocked, true); assert.deepEqual(whole.claims, extractClaims(source(longCall, 'call.txt')));
 });
 
-test('chunking: a schema failure names the failing field path, never the value', async () => {
+test('chunking: an invalid claim is dropped alone with only field paths and counts logged', async () => {
   const chunks = splitChunks(longCall);
   const { claude, failures } = chunkClaude(text => text === chunks[0]!.text
-    ? { claims: [{ type: 'money', quote: turnQuote(0), amount: 100, unit: 'USD', period: '' }] } : { claims: quotesIn(text) });
-  const result = await createClaimExtractor(claude, () => {})(source(longCall, 'call.txt'));
+    ? { claims: [...quotesIn(text), { type: 'money', quote: 'private invalid claim', unit: 'USD', period: '' }] } : { claims: quotesIn(text) });
+  const notes: ExtractionNote[] = [];
+  const result = await createClaimExtractor(claude, note => notes.push(note))(source(longCall, 'call.txt'));
   assert.equal(result.claims.length, 8);
-  assert.deepEqual(failures.map(note => [note.reason, note.path, note.code, note.label]),
-    [1, 2].map(() => ['schema', 'claims.0.amount', 'invalid_type', `extract 1/${chunks.length}`]));
+  assert.deepEqual(failures, []);
+  assert.equal(notes[0]!.invalid_claims, 1);
+  assert.deepEqual(notes[0]!.invalid_fields, [`chunks.0.claims.${quotesIn(chunks[0]!.text).length}.amount`]);
+  assert.ok(!JSON.stringify(notes).includes('private'));
+});
+
+test('claims: unknown keys are stripped before grounding and never reach findings', async () => {
+  const quote = 'Revenue USD 100.00';
+  const raw = { type: 'money', quote, amount: '100.00', unit: 'USD', period: '', decision: 'NO', secretExtra: 'private extra' };
+  assert.deepEqual(claimSchema.parse(raw), { type: 'money', quote, amount: '100.00', unit: 'USD', period: '' });
+  const { claude, requests } = claudeStub([{ claims: [raw, { type: 'text', quote: 'invented', extra: 'private extra' }] },
+    { explanation: 'The passages agree.' }]);
+  const notes: ExtractionNote[] = [];
+  const result = await checkClaims([source(quote)], [source('revenue,100.00', 'proof.csv')], neverJev,
+    { claude, extractor: createClaimExtractor(claude, note => notes.push(note)) });
+  assert.equal(result.findings.length, 1); assert.equal(result.findings[0]!.decision, 'YES');
+  assert.equal(result.findings[0]!.mocked, false); assert.equal(requests.length, 2);
+  assert.equal(notes[0]!.dropped_claims, 1);
+  assert.ok(!/secretExtra|private extra/.test(JSON.stringify([result, notes])));
+});
+
+test('chunking: truncation splits into halves and retries with full-source periods and order', async () => {
+  const text = `Q3 2026\n${turnQuote(0)}\n${' '.repeat(100)}\n${turnQuote(1)}`;
+  const { claude, requests, failures } = chunkClaude(chunk => chunk === text
+    ? { stop_reason: 'max_tokens', content: [{ type: 'text', text: 'private partial JSON' }] }
+    : { claims: quotesIn(chunk) });
+  const notes: ExtractionNote[] = [];
+  const result = await createClaimExtractor(claude, note => notes.push(note))(source(text));
+  assert.equal(requests.length, 3);
+  assert.equal(requests.slice(1).join(''), text);
+  assert.ok(requests.slice(1).every(part => part.length <= Math.ceil(text.length / 2)));
+  assert.deepEqual(result.claims.map(claim => claim.quote), [turnQuote(0), turnQuote(1)]);
+  assert.ok(result.claims.every(claim => claim.period === '2026-Q3' && claim.money !== null && !claim.mocked));
+  assert.equal(result.mocked, false); assert.equal(notes[0]!.split_chunks, 1); assert.equal(notes[0]!.failed_chunks, 0);
+  assert.deepEqual(failures, [{ event: 'claude_attempt_failed', label: 'extract 1/1', attempt: 1, reason: 'stop_reason', stop_reason: 'max_tokens' }]);
+  assert.ok(!JSON.stringify([notes, failures]).includes('private'));
+});
+
+test('chunking: three worker slots include 429 backoff and retries', async () => {
+  let active = 0; let peak = 0; let calls = 0; let waits = 0;
+  const attempts = new Map<string, number>();
+  const claude = createClaude('test-only-placeholder', async (_url, init) => {
+    calls++; active++; peak = Math.max(peak, active);
+    const text = JSON.parse(JSON.parse(String(init?.body)).messages[0].content).text as string;
+    await new Promise<void>(resolve => setImmediate(resolve));
+    active--;
+    const attempt = (attempts.get(text) ?? 0) + 1; attempts.set(text, attempt);
+    if (attempt === 1) return new Response(null, { status: 429 });
+    return Response.json({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify({ claims: quotesIn(text) }) }] });
+  }, () => {}, async milliseconds => { waits++; assert.equal(milliseconds, 500); await new Promise<void>(resolve => setImmediate(resolve)); });
+  const result = await createClaimExtractor(claude, () => {})(source(longCall));
+  assert.equal(peak, 3); assert.equal(waits, splitChunks(longCall).length); assert.equal(calls, waits * 2);
+  assert.equal(result.claims.length, 8); assert.equal(result.mocked, false);
 });
 
 test('chunking: a quote returned by two chunks is one claim; a quote that truly repeats in the source stays two claims', async () => {

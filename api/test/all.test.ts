@@ -10,7 +10,7 @@ import { contractRows, extractClaims, normalizePeriod } from '../src/extract.js'
 import { createJev, type Jev, type Transport } from '../src/jev.js';
 import { compareMoney, containsMoney, decimal, parseMoney } from '../src/money.js';
 import { createTranscriber } from '../src/transcribe.js';
-import { filingFigures } from '../src/filing.js';
+import { filingFigures, legacyFigures } from '../src/filing.js';
 import { createClaude } from '../src/claude.js';
 import { bareMoneyAmount, createClaimExtractor, signedContractsAssertion } from '../src/extract.js';
 import type { CheckResponse, Segment, SourceText } from '../src/types.js';
@@ -62,7 +62,7 @@ test('Claude: unfamiliar prose extracts grounded money; code computes gaps; expl
   assert.equal(finding.explanation, 'The claim and the finance report state different revenue amounts.');
   assert.equal(requests.length, 2);
   assert.ok(requests.every(request => request.model === 'claude-sonnet-5-5'));
-  assert.deepEqual(requests.map(request => request.max_tokens), [4096, 256]);
+  assert.deepEqual(requests.map(request => request.max_tokens), [8192, 256]);
   assert.deepEqual(JSON.parse(requests[1]!.messages[0]!.content), { claim_quote: quote, proof_quote: 'revenue,1175000.00' });
 });
 
@@ -979,3 +979,197 @@ test('per-share rows are never scaled by the table heading; an unclear unit fail
   assert.equal(review.findings[0]!.decision, 'NEEDS_REVIEW'); assert.match(review.findings[0]!.explanation, /unit that cannot be told/);
   assert.equal(state.calls, 0);
 });
+
+// ---- PDF-style tables (hand-made fixture mimicking pdf-parse output: tab cells, "$" in its own cell) ----------
+const pdfRelease = [
+  'Example Corp. Reports Third-Quarter 2026 Net Income of $12.4 Billion',
+  'EXAMPLE CORP (EXC)',
+  'Results for EXC',
+  '($ millions, except per share data)\t3Q26\t2Q26\t3Q25\t$ O/(U)\tO/(U) %',
+  'Net revenue - reported\t$ 47,310\t$ 49,020\t$ 44,870\t$ (1,710)\t(3)%',
+  'Net revenue - managed\t47,886\t49,610\t45,432\t(1,724)\t(12)',
+  'Net income\t$ 12,418\t$ 13,902\t$ 11,276\t$ (1,484)\t(11)%',
+  'Earnings per share - diluted\t$ \t4.31\t$ \t4.88\t$ \t3.92\t$ \t(0.57)\t(11)%',
+  'Return on tangible common equity\t18 %\t21 %\t18 %',
+  'RETAIL BANKING (RTL)',
+  'Results for RTL',
+  '($ millions)\t3Q26\t2Q26\t3Q25\t$ O/(U)\tO/(U) %',
+  'Net revenue\t$ 18,460\t$ 17,905\t$ 17,120\t$ 555\t3 %',
+  'Net income\t$ 4,930\t$ 4,712\t$ 4,410\t$ 218\t5 %',
+].join('\n');
+const cases = (text: string, quotes: string[], types: string[] = []) => quotes.map((quote, index) => types[index] === 'text'
+  ? { type: 'text', quote } : { type: 'money', quote, amount: /\$?[\d.]+(?: billion)?/.exec(quote.slice(quote.search(/[$\d]/)))![0], unit: '', period: '' }).filter(claim => text.includes(claim.quote));
+
+test('PDF tables: tab cells, "$" cells, parentheses and percent cells are read; revenue matches a row by amount', async () => {
+  const figures = filingFigures(source(pdfRelease, 'release.pdf'));
+  const pick = (key: string, period: string, section: string | null) => figures.filter(f => f.key === key && f.period === period && f.section === section);
+  assert.deepEqual(pick('revenue', '2026-Q3', 'EXAMPLE CORP (EXC)').map(f => [f.basis, f.money!.cents]),
+    [['reported', 4731000000000n], ['managed', 4788600000000n]]);
+  assert.equal(pick('earning per share diluted', '2025-Q3', 'EXAMPLE CORP (EXC)')[0]!.money!.cents, 392n);
+  assert.equal(pick('return on tangible common equity', '2026-Q3', 'EXAMPLE CORP (EXC)')[0]!.percent!.value, 180000n);
+  assert.equal(pick('net income', '2026-Q3', 'RETAIL BANKING (RTL)')[0]!.firmwide, false);
+  assert.ok(figures.every(f => f.currency === 'USD' && f.period !== null));
+  const { jev, state } = countingJev();
+  const managed = 'Revenue of $47.9 billion in the third quarter';
+  const result = await callCheck(`${managed}.`, [moneyClaim(managed, '$47.9 billion')], pdfRelease, jev);
+  assert.equal(result.findings[0]!.decision, 'YES'); assert.equal(result.findings[0]!.proof_usd, '47886000000.00');
+  const reported = 'reported revenue of $47.3 billion in the third quarter';
+  assert.equal((await callCheck(`${reported}.`, [moneyClaim(reported, '$47.3 billion')], pdfRelease, jev)).findings[0]!.decision, 'YES');
+  // Equal to neither basis: unsettled, never a guessed NO.
+  const neither = 'Revenue of $45.0 billion in the third quarter';
+  const unsettled = await callCheck(`${neither}.`, [moneyClaim(neither, '$45.0 billion')], pdfRelease, jev);
+  assert.equal(unsettled.findings[0]!.decision, 'NEEDS_REVIEW'); assert.match(unsettled.findings[0]!.explanation, /reported and managed/);
+  assert.equal(state.calls, 0);
+});
+
+test('aliases: EPS, total net revenue, managed revenue and ROTCE find their table rows', async () => {
+  const text = 'The Firm delivered net income of $12.4 billion, EPS of $4.31, and an ROTCE of 18% in the third quarter.';
+  const quotes = ['net income of $12.4 billion', 'EPS of $4.31', 'ROTCE of 18%'];
+  const { claude, requests } = claudeStub([{ claims: [moneyClaim(quotes[0]!, '$12.4 billion', ''), moneyClaim(quotes[1]!, '$4.31', ''), { type: 'text', quote: quotes[2] }] }]);
+  const { jev, state } = countingJev();
+  const result = await checkClaims([source(callHeader + text, 'call.txt')], [source(pdfRelease, 'release.pdf')], jev, { claude });
+  assertResponse(result);
+  assert.deepEqual(result.findings.map(f => f.decision), ['YES', 'YES', 'YES']);
+  assert.equal(result.findings.find(f => f.claim === quotes[1])!.proof_usd, '4.31');
+  assert.match(requests[0]!.system, /one metric and one number per claim/); assert.match(requests[0]!.system, /EPS of \$5\.57/);
+  assert.equal(state.calls, 0);
+  for (const phrase of ['total net revenue of $47.9 billion', 'managed revenue of $47.9 billion']) {
+    const alias = await callCheck(`We posted ${phrase} in the third quarter.`, [moneyClaim(phrase, '$47.9 billion', '')], pdfRelease, jev);
+    assert.equal(alias.findings[0]!.decision, 'YES', phrase);
+  }
+});
+
+test('compound claims: a level and its change are split; only the level is checked, the change needs review', async () => {
+  const compound = 'Revenue of $47.9 billion, up 3% year-on-year';
+  const { jev, state } = countingJev();
+  const result = await callCheck(`${compound}.`, [moneyClaim(compound, '$47.9 billion', '')], pdfRelease, jev);
+  assert.equal(result.findings.length, 2);
+  const level = result.findings.find(f => f.claim === 'Revenue of $47.9 billion')!;
+  const change = result.findings.find(f => f.claim === 'up 3% year-on-year')!;
+  assert.equal(level.decision, 'YES');
+  assert.equal(change.decision, 'NEEDS_REVIEW'); assert.match(change.explanation, /change/); assert.equal(change.proof_source, null);
+  // A quote Claude adds that is not in the source is dropped by code, as before.
+  const dropped = await callCheck('Revenue of $47.9 billion in the third quarter.', [moneyClaim('Revenue of $47.9 billion in Q3', '$47.9 billion', ''),
+    moneyClaim('Revenue of $47.9 billion in the third quarter', '$47.9 billion', '')], pdfRelease, jev);
+  assert.equal(dropped.findings.length, 1);
+  // Change claims are never compared with a level, even when the number happens to equal one.
+  for (const quote of ['Revenue was up 3% year-on-year', 'Net income rose 5%', 'Revenue increased by $1.7 billion']) {
+    const claim = /\$/.test(quote) ? moneyClaim(quote, '$1.7 billion', '') : { type: 'text', quote };
+    const review = await callCheck(`${quote}.`, [claim], pdfRelease, jev);
+    assert.equal(review.findings[0]!.decision, 'NEEDS_REVIEW', quote); assert.match(review.findings[0]!.explanation, /change/, quote);
+  }
+  assert.equal(state.calls, 0);
+});
+
+test('segments: a claim that names no segment never becomes a NO from a segment figure, and a named segment uses its own table', async () => {
+  const { jev, state } = countingJev();
+  const segmentAmount = 'net income of $4.9 billion in the third quarter';
+  const unnamed = await callCheck(`We had ${segmentAmount}.`, [moneyClaim(segmentAmount, '$4.9 billion', '')], pdfRelease, jev);
+  assert.equal(unnamed.findings[0]!.decision, 'NEEDS_REVIEW'); assert.match(unnamed.findings[0]!.explanation, /different section/);
+  const named = 'RTL net income of $4.9 billion in the third quarter';
+  assert.equal((await callCheck(`${named}.`, [moneyClaim(named, '$4.9 billion', '')], pdfRelease, jev)).findings[0]!.decision, 'YES');
+  const wrong = 'net income of $11.0 billion in the third quarter';
+  const no = await callCheck(`We had ${wrong}.`, [moneyClaim(wrong, '$11.0 billion', '')], pdfRelease, jev);
+  assert.equal(no.findings[0]!.decision, 'NO'); assert.equal(no.findings[0]!.proof_usd, '12418000000.00');
+  assert.equal(state.calls, 0);
+});
+
+test('currency per section: a USD heading with bare numbers is compared in code; euro, mixed or no evidence stays NEEDS_REVIEW', async () => {
+  const claim = 'Revenue of $47.9 billion in the third quarter';
+  const { jev, state } = countingJev();
+  const run = async (proof: string, quote = claim, amount = '$47.9 billion') =>
+    (await callCheck(`${quote}.`, [moneyClaim(quote, amount, '')], proof, jev)).findings[0]!;
+  const usdHeading = 'Third-quarter 2026\n($ in millions)\nNet revenue 47,886\nNet income 12,418';
+  assert.equal((await run(usdHeading)).decision, 'YES');
+  const no = await run(usdHeading, 'Revenue of $55.0 billion in the third quarter', '$55.0 billion');
+  assert.equal(no.decision, 'NO'); assert.equal(no.gap_usd, '7114000000.00');
+  assert.equal((await run('Third-quarter 2026\nin millions of dollars\nNet revenue 47,886')).decision, 'YES');
+  assert.equal((await run('Third-quarter 2026\nAll amounts in USD millions\nNet revenue 47,886')).decision, 'YES');
+  for (const proof of ['Third-quarter 2026\n(€ in millions)\nNet revenue 47,886',
+    'Third-quarter 2026\n(in millions of euros)\nNet revenue 47,886',
+    'Third-quarter 2026\n($ in millions)\nNet revenue 47,886\nOf which €2 million is FX', // two currencies in one section
+    'Third-quarter 2026\n(GBP in millions)\n($ in millions)\nNet revenue 47,886',
+    'Third-quarter 2026\nNet revenue 47,886', // no currency evidence at all
+  ]) {
+    const finding = await run(proof);
+    assert.equal(finding.decision, 'NEEDS_REVIEW', proof); assert.equal(finding.proof_usd, null, proof); assert.equal(finding.jev_probability, null);
+  }
+  // A euro section elsewhere does not poison a USD section.
+  assert.equal((await run('Third-quarter 2026\n($ in millions)\nNet revenue 47,886\nEURO AREA (EUR)\n(€ in millions)\nNet revenue 40,000')).decision, 'YES');
+  assert.equal(state.calls, 0);
+});
+
+test('claim currency: a bare amount takes USD from a $ elsewhere in the source; any other currency marker keeps it NEEDS_REVIEW', async () => {
+  const bare = 'Revenue was 47.9 billion for the quarter';
+  const run = async (callText: string) => {
+    const { claude } = claudeStub([{ claims: [{ type: 'text', quote: bare }] }]);
+    const result = await checkClaims([source(`${callHeader}${callText}`, 'call.txt')], [source(pdfRelease, 'release.pdf')], neverJev, { claude });
+    assertResponse(result); return result.findings[0]!;
+  };
+  const usd = await run(`Net income was $12.4 billion.\n${bare}.`);
+  assert.equal(usd.decision, 'YES'); assert.equal(usd.claimed_usd, '47900000000.00');
+  const mixed = await run(`Net income was $12.4 billion and Europe added €2 billion.\n${bare}.`);
+  assert.equal(mixed.decision, 'NEEDS_REVIEW'); assert.equal(mixed.claimed_usd, null); assert.match(mixed.explanation, /could not be read safely as US dollars/);
+  const none = await run(`${bare}.`);
+  assert.equal(none.decision, 'NEEDS_REVIEW'); assert.equal(none.claimed_usd, null);
+});
+
+// ---- One validation for every evidence path (inline/legacy matches and table/prose figures) -------------------
+const evidencePaths = [{ name: 'legacy path only', legacy: true, filing: false }, { name: 'figure path only', legacy: false, filing: true },
+  { name: 'both paths', legacy: true, filing: true }] as const;
+async function pathCheck(path: (typeof evidencePaths)[number], claim: string, claimedAmount: string, proof: string, jev: Jev, period = 'Q3 2026') {
+  const { claude } = claudeStub([{ claims: [moneyClaim(claim, claimedAmount, period)] }]);
+  const result = await checkClaims([source(`Example Corp Q3 2026 earnings call\nWe posted ${claim}.`, 'call.txt')], [source(proof, 'proof.txt')], jev,
+    { claude, evidence: { legacy: path.legacy, filing: path.filing } });
+  assertResponse(result);
+  return result.findings[0]!;
+}
+
+test('legacy inline matches are placed in their section, basis and currency like any other figure', () => {
+  const text = 'Example Corp. Q3 2026 results\nManaged revenue of USD 47.9 billion\nRETAIL BANKING (RTL)\nRevenue of USD 18.5 billion';
+  const figures = legacyFigures(source(text, 'proof.txt'));
+  assert.deepEqual(figures.map(f => [f.key, f.basis, f.section, f.firmwide, f.currency, f.period]),
+    [['revenue', 'managed', null, true, 'USD', '2026-Q3'], ['revenue', null, 'RETAIL BANKING (RTL)', false, 'USD', '2026-Q3']]);
+});
+
+for (const path of evidencePaths) {
+  test(`reporting basis (${path.name}): a reported-revenue claim whose only match is a managed-revenue row is NEEDS_REVIEW`, async () => {
+    const { jev, state } = countingJev();
+    const proof = 'Example Corp. Q3 2026 results\nManaged revenue of USD 47.9 billion';
+    const reported = await pathCheck(path, 'reported revenue of $47.9 billion', '$47.9 billion', proof, jev);
+    assert.equal(reported.decision, 'NEEDS_REVIEW'); assert.equal(reported.label, 'insufficient');
+    assert.match(reported.explanation, /different reporting basis/);
+    assert.equal(reported.proof_source, null); assert.equal(reported.proof_usd, null); assert.equal(reported.jev_probability, null);
+    // The same row supports a claim that says managed, so the row itself is read correctly.
+    const managed = await pathCheck(path, 'managed revenue of $47.9 billion', '$47.9 billion', proof, jev);
+    assert.equal(managed.decision, 'YES');
+    // And the reverse: a managed claim never rests on a reported row.
+    const other = await pathCheck(path, 'managed revenue of $47.9 billion', '$47.9 billion', 'Example Corp. Q3 2026 results\nReported revenue of USD 47.9 billion', jev);
+    assert.equal(other.decision, 'NEEDS_REVIEW'); assert.match(other.explanation, /different reporting basis/);
+    assert.equal(state.calls, 0);
+  });
+
+  test(`section (${path.name}): a firmwide revenue claim whose only match is a segment table row is NEEDS_REVIEW`, async () => {
+    const { jev, state } = countingJev();
+    const proof = 'Example Corp. Q3 2026 results\nRETAIL BANKING (RTL)\nRevenue of USD 18.5 billion';
+    const firmwide = await pathCheck(path, 'revenue of $18.5 billion', '$18.5 billion', proof, jev);
+    assert.equal(firmwide.decision, 'NEEDS_REVIEW'); assert.match(firmwide.explanation, /different section/);
+    assert.equal(firmwide.proof_source, null); assert.equal(firmwide.jev_probability, null);
+    // Not a NO either, whatever the amount: a segment figure says nothing about the firm.
+    const different = await pathCheck(path, 'revenue of $20.0 billion', '$20.0 billion', proof, jev);
+    assert.equal(different.decision, 'NEEDS_REVIEW'); assert.equal(different.gap_usd, null);
+    // A claim that names the segment uses the segment's own figure.
+    const named = await pathCheck(path, 'RTL revenue of $18.5 billion', '$18.5 billion', proof, jev);
+    assert.equal(named.decision, 'YES');
+    assert.equal(state.calls, 0);
+  });
+
+  test(`currency per section (${path.name}): a second currency anywhere in the section keeps the amount from being compared`, async () => {
+    const { jev, state } = countingJev();
+    const mixed = await pathCheck(path, 'revenue of $47.9 billion', '$47.9 billion', 'Example Corp. Q3 2026 results\nRevenue of USD 47.9 billion\nFX cost of €2 million', jev);
+    assert.equal(mixed.decision, 'NEEDS_REVIEW'); assert.match(mixed.explanation, /not clearly in US dollars/);
+    const clean = await pathCheck(path, 'revenue of $47.9 billion', '$47.9 billion', 'Example Corp. Q3 2026 results\nRevenue of USD 47.9 billion\nFX cost of $2 million', jev);
+    assert.equal(clean.decision, 'YES');
+    assert.equal(state.calls, 0);
+  });
+}

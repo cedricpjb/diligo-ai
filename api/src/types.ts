@@ -17,6 +17,8 @@ export interface Claim {
   amountIndex?: number;
   // The amount is followed by a scale word code cannot parse. No amount is shown; the claim needs review.
   scaleUnparsed?: boolean;
+  // The table scale in effect where a proof amount was read (1 = plain dollars); lets later checks judge the unit.
+  scale?: bigint;
 }
 export interface Finding {
   id: string; claim: string;

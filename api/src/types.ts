@@ -13,6 +13,8 @@ export interface Claim {
   type?: 'money' | 'text' | 'contract';
   stated?: { amount: string; unit: string; period: string };
   offset?: number;
+  // True when this claim came from the regex fallback rather than Claude (the finding is then a mock result).
+  mocked?: boolean;
   // Index of the claimed amount inside `quote`; lets code read the metric name that precedes it.
   amountIndex?: number;
   // The amount is followed by a scale word code cannot parse. No amount is shown; the claim needs review.

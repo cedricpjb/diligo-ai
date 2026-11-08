@@ -47,6 +47,11 @@ const OTHER_SECTION = 'The claimed amount matches this metric in a different sec
 const ONLY_OTHER_SECTION = 'The only matching amounts for this metric and period are in a different section of the proof (for example a segment table) than the claim names, so they were not used.';
 const BASIS_MISMATCH = 'The only matching amounts for this metric and period are on a different reporting basis (managed versus reported) than the claim names, so they were not used.';
 const UNREADABLE_AMOUNT = 'The amount could not be read safely as US dollars, so it needs review.';
+const EXPLANATION_CONCURRENCY = 6;
+function fixedExplanation(finding: Finding): string {
+  const excerpt = (quote: string) => JSON.stringify(quote.length > 140 ? `${quote.slice(0, 137)}...` : quote);
+  return `${finding.explanation} Claim: ${excerpt(finding.claim_source.quote)}${finding.proof_source ? ` Proof: ${excerpt(finding.proof_source.quote)}` : ''}`;
+}
 // A passage is relevant only when it shares the claim's metric, an entity or a number, not merely a couple of common words.
 function textEvidence(claim: Claim, sources: SourceText[]): { source: SourceText; quote: string } | null {
   const words = (text: string) => new Set(text.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g)?.filter(word =>
@@ -113,17 +118,18 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
   const extractor = options.extractor ?? createClaimExtractor(claude);
   const extractions = await Promise.all(claimSources.map(source => options.extract
     ? { claims: options.extract(source), mocked: true } : extractor(source)));
-  const claims = extractions.flatMap(result => result.claims);
-  const extractionMocked = extractions.some(result => result.mocked);
+  // A claim is a mock result only if it came from the regex fallback: its own chunk failed, or its whole source did.
+  const claims = extractions.flatMap(result => result.claims.map(claim => result.mocked && !claim.mocked ? { ...claim, mocked: true } : claim));
   const figures = proofSources.flatMap(source => proofFigures(source, options.evidence));
   const register = proofSources.flatMap(contractRows);
   const ranked: Ranked[] = [];
+  const explanations: Finding[] = [];
   const counts = new Map<string, number>();
   for (const claim of claims) {
     const count = (counts.get(claim.metric) ?? 0) + 1;
     counts.set(claim.metric, count);
     const finding = baseFinding(claim, `f-${claim.metric}${count > 1 ? `-${count}` : ''}`);
-    finding.mocked = extractionMocked || claim.source.mocked;
+    finding.mocked = claim.mocked === true || claim.source.mocked;
     let locked = false; // A fixed reason the explainer must not replace.
     const lock = (reason: string, action = 'Obtain matching source evidence and review the claim.') => {
       review(finding, reason); finding.next_action = action; locked = true;
@@ -152,8 +158,8 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
         // A proof amount is compared with a USD claim only when it is clearly USD and its unit is clear.
         const foreign = found.some(f => f.currency !== 'USD');
         const unclear = found.find(f => f.unitUnclear);
-        if (foreign) { lock(NOT_USD); ranked.push({ finding, claim }); continue; }
-        if (unclear) { lock(UNCLEAR_UNIT); ranked.push({ finding, claim }); continue; }
+        if (foreign) { lock(NOT_USD); finding.explanation = fixedExplanation(finding); ranked.push({ finding, claim }); continue; }
+        if (unclear) { lock(UNCLEAR_UNIT); finding.explanation = fixedExplanation(finding); ranked.push({ finding, claim }); continue; }
         const candidates = found.map(f => ({ money: f.money!, quote: f.quote, source: f.source, basis: f.basis }));
         // Most precise figure first. A rounded headline ("$14.4 billion") agrees with an exact table cell (14,393 million)
         // when the exact figure rounds to it; anything else is a genuine conflict.
@@ -257,11 +263,22 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
       }
     }
     verifyQuotes(finding, [...claimSources, ...proofSources]);
-    const explanation = locked && finding.decision === 'NEEDS_REVIEW' ? null : await explainFinding(claude, finding.claim_source.quote, finding.proof_source?.quote ?? null);
-    if (explanation) finding.explanation = explanation;
-    else if (!locked) finding.mocked = true;
+    if (locked || !finding.proof_source || finding.explanation.startsWith('A quoted')) {
+      finding.explanation = fixedExplanation(finding);
+    } else explanations.push(finding);
     ranked.push({ finding, claim });
   }
+  // Workers retain their slot during retries/backoff. Write to the original finding,
+  // never push in completion order, so document order and existing ranking stay stable.
+  let nextExplanation = 0;
+  await Promise.all(Array.from({ length: Math.min(EXPLANATION_CONCURRENCY, explanations.length) }, async () => {
+    while (nextExplanation < explanations.length) {
+      const finding = explanations[nextExplanation++]!;
+      const explanation = await explainFinding(claude, finding.claim_source.quote, finding.proof_source!.quote);
+      if (explanation) finding.explanation = explanation;
+      else finding.mocked = true;
+    }
+  }));
   const all = [...claimSources, ...proofSources];
   const periods = [...new Set(claims.map(c => c.period).filter((p): p is string => !!p && p !== 'AMBIGUOUS'))];
   const company = all.map(s => /^Company\s*:\s*(.+)$/im.exec(s.text)?.[1]?.trim()).find(Boolean);

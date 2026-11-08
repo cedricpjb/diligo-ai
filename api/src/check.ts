@@ -260,7 +260,7 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
           // Lack of Jev support is not a deterministic contradiction.
           setDecision(finding, probabilityDecision(result.probability, thresholds) === 'YES' && completeAssertion(claim.quote) ? 'YES' : 'NEEDS_REVIEW');
           finding.explanation = finding.decision === 'YES' ? 'The matching passage supports the claim.' : 'The matching passage needs human review.';
-          if (result.probability <= thresholds.no) lock('Jev found no support in the proof');
+          if (result.probability < thresholds.yes) lock('Jev found no support in the proof');
           finding.next_action = finding.decision === 'YES' ? 'No action needed.' : 'Review the claim against the cited passage.';
         }
       }

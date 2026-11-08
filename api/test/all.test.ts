@@ -1060,13 +1060,13 @@ test('claim quality: names, headings, document titles and topic fragments never 
 
 test('Jev: only complete assertions can get YES; low scores never set NO', async () => {
   const quote = 'The Denver office opened in May.';
-  for (const probability of [0.06, 0.2, 0.5, 0.8, 0.99]) {
+  for (const probability of [0.06, 0.2, 0.5, 0.79999, 0.8, 0.99]) {
     const { claude } = claudeStub([{ claims: [{ type: 'text', quote }] }, { explanation: 'The quotes state that the office opened.' }]);
     const result = await checkClaims([source(quote)], [source(quote)], { async ask() { return { probability, mocked: false }; } }, { claude });
     const finding = result.findings[0]!;
     assert.equal(finding.decision, probability >= 0.8 ? 'YES' : 'NEEDS_REVIEW');
     assert.equal(finding.jev_probability, probability);
-    if (probability <= 0.2) assert.match(finding.explanation, /Jev found no support in the proof/);
+    if (probability < 0.8) assert.match(finding.explanation, /^Jev found no support in the proof/);
   }
   assert.equal(completeAssertion('Revenue of $62.7 billion'), false);
   assert.equal(checkableClaim('Revenue of $62.7 billion'), true);

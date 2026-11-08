@@ -51,13 +51,27 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
         const amount = bareMoneyAmount(item.quote);
         if (amount !== null) { item = { type: 'money', quote: item.quote, amount, unit: '', period: '' }; bare = true; }
       }
-      const context = [item.quote, ...headings].join('\n');
+      // The whole source line holds the claim's context too: "Target 1, 2026 Q3. Cash USD 480,000." dates the
+      // amount even when Claude quoted only the amount. An unambiguous period on the line beats an inherited one.
+      const lineStart = source.text.lastIndexOf('\n', offset - 1) + 1;
+      const lineEnd = source.text.indexOf('\n', offset + item.quote.length);
+      const line = source.text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd).replace(/\r$/, '');
+      const linePeriod = periodFromLine(line);
+      const context = [item.quote, line, ...headings].join('\n');
       const claim: Claim = { metric: item.type === 'money' ? 'other-money' : item.type,
-        type: item.type, source, quote: item.quote, offset, money: null, period: periodFromLine(item.quote) ?? inheritedPeriod };
+        type: item.type, source, quote: item.quote, offset, money: null,
+        period: periodFromLine(item.quote) ?? (linePeriod && linePeriod !== 'AMBIGUOUS' ? linePeriod : inheritedPeriod) };
       if (item.type === 'money') {
         claim.stated = { amount: item.amount, unit: item.unit, period: item.period };
         const metrics = [...new Set(item.quote.toLowerCase().match(/\b(?:revenue|cash|debt)\b/g))];
         if (metrics.length === 1) claim.metric = metrics[0] as Metric;
+        else if (metrics.length > 1) {
+          // A quote covering several metrics: the label belongs to the amount it directly precedes.
+          const at = item.quote.indexOf(item.amount);
+          const label = at < 0 ? null : /\b(revenue|cash(?:\s+on\s+hand)?|(?:total\s+)?debt)\b(?:\s*(?:for\s+the\s+period|was|is|of|[:,="]|USD|US\s+dollars?|\$))*\s*$/i
+            .exec(item.quote.slice(0, at))?.[1];
+          if (label) claim.metric = /revenue/i.test(label) ? 'revenue' : /cash/i.test(label) ? 'cash' : 'debt';
+        }
         const statedPeriod = item.period ? normalizePeriod(item.period) ?? 'AMBIGUOUS' : claim.period;
         claim.period = claim.period && statedPeriod !== claim.period ? 'AMBIGUOUS' : statedPeriod;
         const grounded = item.quote.includes(item.amount) && (!item.unit || item.unit.split(/\s+/).every(word => context.includes(word)))

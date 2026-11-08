@@ -24,6 +24,7 @@ import { Label } from "@/components/ui/label"
 import { recordingFileName } from "@/lib/recording"
 import { CallRecorder } from "./call-recorder"
 import { FileDropzone } from "./file-dropzone"
+import { FormCard } from "./form-card"
 import { ProcessingPanel, type ProcessingStep } from "./processing-panel"
 
 type FieldErrors = Partial<Record<"dealName" | "ticker" | "claims" | "proof" | "request", string>>
@@ -233,22 +234,7 @@ export function NewInvestigationForm() {
       <fieldset disabled={busy} className="flex min-w-0 flex-col gap-5">
         <legend className="sr-only">Investigation details and files</legend>
 
-        <section
-          aria-labelledby="deal-title"
-          className="rounded-2xl border border-border bg-card p-5 shadow-card sm:p-6"
-        >
-          <header className="mb-5 flex items-baseline gap-3">
-            <span className="font-mono text-xs text-muted-foreground tabular-nums">01</span>
-            <div>
-              <h2 id="deal-title" className="text-base font-semibold tracking-tight">
-                The deal
-              </h2>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                Name the company you are checking.
-              </p>
-            </div>
-          </header>
-
+        <FormCard titleId="deal-title" step="01" title="The deal" description="Name the company you are checking.">
           <div className="grid gap-5 sm:grid-cols-[minmax(0,1fr)_12rem]">
             <div className="flex flex-col gap-2">
               <Label htmlFor="deal-name">Company and deal name</Label>
@@ -265,7 +251,7 @@ export function NewInvestigationForm() {
                   setDealName(event.target.value)
                   if (errors.dealName) setErrors((prev) => ({ ...prev, dealName: undefined }))
                 }}
-                className="h-11 px-3.5 text-[15px]"
+                className="h-11 px-3.5 text-sm"
               />
               {errors.dealName && <FieldError id="deal-name-error">{errors.dealName}</FieldError>}
             </div>
@@ -290,12 +276,12 @@ export function NewInvestigationForm() {
                   setTicker(event.target.value.toUpperCase().replace(/\s/g, ""))
                   if (errors.ticker) setErrors((prev) => ({ ...prev, ticker: undefined }))
                 }}
-                className="h-11 px-3.5 font-mono text-[15px] uppercase tracking-wide placeholder:normal-case"
+                className="h-11 px-3.5 font-mono text-sm uppercase tracking-wide placeholder:normal-case"
               />
               {errors.ticker && <FieldError id="ticker-error">{errors.ticker}</FieldError>}
             </div>
           </div>
-        </section>
+        </FormCard>
 
         <div className="grid gap-5 lg:grid-cols-2">
           <div className="flex min-w-0 flex-col gap-5">
@@ -348,7 +334,7 @@ export function NewInvestigationForm() {
               >
                 <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
                 <div>
-                  <p className="font-medium text-foreground">The check did not finish.</p>
+                  <p className="font-semibold text-foreground">The check did not finish.</p>
                   <p className="mt-0.5 text-muted-foreground">
                     {phase.message} Your files are still here.
                   </p>
@@ -378,7 +364,7 @@ export function NewInvestigationForm() {
               <Button
                 type="submit"
                 disabled={recordingActive}
-                className="h-11 gap-2 rounded-lg px-6 text-[15px] font-semibold transition-[background-color,transform] duration-150 hover:-translate-y-px hover:bg-[#fb8a3c] active:translate-y-px active:scale-[0.985]"
+                className="h-11 gap-2 rounded-lg px-6 text-sm font-semibold transition-[background-color,transform] duration-150 hover:-translate-y-px hover:bg-[#fb8a3c] active:translate-y-px active:scale-[0.985]"
               >
                 {phase.kind === "failed" ? "Analyze again" : "Analyze"}
                 <ArrowRight className="size-4" aria-hidden />

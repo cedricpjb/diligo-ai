@@ -4,6 +4,7 @@ import { useState } from "react"
 import { ChevronRight, Flag, Check } from "lucide-react"
 
 import {
+  FINDINGS_SORT_NOTE,
   formatProbability,
   hasNoProof,
   MANY_FINDINGS,
@@ -55,7 +56,7 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
           Findings
         </h2>
         <p className="text-sm text-muted-foreground">
-          Sorted by priority, then by size of the gap. Select a finding to see the evidence.
+          {FINDINGS_SORT_NOTE} Select a finding to see the evidence.
         </p>
       </div>
 
@@ -68,7 +69,7 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
               aria-pressed={active === id}
               onClick={() => setFilter(id)}
               className={cn(
-                "inline-flex h-9 items-center gap-2 rounded-full border px-3.5 text-sm font-medium transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                "inline-flex h-9 items-center gap-2 rounded-full border px-3.5 text-sm font-semibold transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 active === id
                   ? "border-foreground/40 bg-white/[0.08] text-foreground"
                   : "border-border text-muted-foreground hover:text-foreground"
@@ -85,7 +86,7 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
       <div className="hidden overflow-hidden rounded-2xl border border-border bg-card shadow-card xl:block">
         <Table>
           <caption className="sr-only">
-            Findings sorted by priority. Select a row to open its evidence.
+            Findings sorted by decision, then priority or Jev score. Select a row to open its evidence.
           </caption>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
@@ -98,6 +99,13 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
             </TableRow>
           </TableHeader>
           <TableBody>
+            {findings.length === 0 && (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={6} className="px-5 py-6 whitespace-normal text-muted-foreground">
+                  No findings match this filter.
+                </TableCell>
+              </TableRow>
+            )}
             {findings.map((finding) => {
               const gap = formatUsd(finding.gap_usd)
               const pct = formatPct(finding.gap_pct)
@@ -106,36 +114,36 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
                 <TableRow
                   key={finding.id}
                   onClick={() => onOpen(finding.id)}
-                  className="cursor-pointer has-focus-visible:bg-muted"
+                  className="h-16 cursor-pointer has-focus-visible:bg-muted"
                 >
-                  <TableCell className="max-w-0 min-w-64 py-3.5 pl-5 whitespace-normal">
+                  <TableCell className="max-w-0 min-w-64 py-0 pl-5 whitespace-normal">
                     <button
                       type="button"
                       className="-m-2 flex w-[calc(100%+1rem)] items-start gap-2 rounded-lg p-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       aria-label={`Open evidence: ${finding.claim}`}
                     >
                       <span className="min-w-0 flex-1">
-                        <span className="block text-sm leading-snug font-medium text-foreground">
+                        <span className="block text-sm leading-snug font-semibold text-foreground">
                           {finding.claim}
                         </span>
                         <span className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                           <span>{PRIORITY_LABEL[finding.priority]} priority</span>
                           <ReviewChip state={reviews[finding.id]} />
-                          {finding.mocked && <MockedBadge className="h-5 px-2 text-[11px]" />}
+                          {finding.mocked && <MockedBadge />}
                         </span>
                       </span>
                     </button>
                   </TableCell>
-                  <TableCell className="py-3.5">
+                  <TableCell className="py-0">
                     <DecisionBadge decision={finding.decision} />
                   </TableCell>
-                  <TableCell className="py-3.5 text-right tabular-nums">
+                  <TableCell className="py-0 text-right tabular-nums">
                     <Amount value={formatUsd(finding.claimed_usd)} />
                   </TableCell>
-                  <TableCell className="py-3.5 text-right tabular-nums">
+                  <TableCell className="py-0 text-right tabular-nums">
                     {hasNoProof(finding) ? <NoProof /> : <Amount value={formatUsd(finding.proof_usd)} />}
                   </TableCell>
-                  <TableCell className="py-3.5 text-right tabular-nums">
+                  <TableCell className="py-0 text-right tabular-nums">
                     {gap ? (
                       <>
                         <span className="block text-foreground">{gap}</span>
@@ -145,7 +153,7 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
                       <Amount value={null} />
                     )}
                   </TableCell>
-                  <TableCell className="py-3.5 pr-5 text-right tabular-nums">
+                  <TableCell className="py-0 pr-5 text-right tabular-nums">
                     <span className="inline-flex items-center justify-end gap-2">
                       {jev ? <span className="text-foreground">{jev}</span> : <Amount value={null} />}
                       <ChevronRight
@@ -181,7 +189,7 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
                     {PRIORITY_LABEL[finding.priority]} priority
                   </span>
                 </span>
-                <span className="text-[15px] leading-snug font-medium text-foreground">
+                <span className="text-sm leading-snug font-semibold text-foreground">
                   {finding.claim}
                 </span>
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
@@ -253,7 +261,7 @@ export function ReviewChip({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[11px] font-medium text-foreground",
+        "inline-flex h-6 items-center gap-1.5 rounded-full border border-border px-2.5 text-xs font-semibold whitespace-nowrap text-foreground",
         className
       )}
     >

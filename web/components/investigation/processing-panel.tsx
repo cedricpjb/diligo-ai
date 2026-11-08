@@ -77,7 +77,7 @@ export function ProcessingPanel({ dealName, steps, onCancel }: ProcessingPanelPr
             <div className="min-w-0">
               <p
                 className={cn(
-                  "text-sm font-medium",
+                  "text-sm font-semibold",
                   step.state === "pending" || step.state === "skipped"
                     ? "text-muted-foreground"
                     : "text-foreground"

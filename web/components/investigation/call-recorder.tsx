@@ -21,6 +21,7 @@ import {
 import { usePreviewUrl } from "@/lib/preview-url"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { FormCard } from "./form-card"
 
 interface CallRecorderProps {
   /** The recording currently in the "What they said" list, if any. */
@@ -99,23 +100,15 @@ export function CallRecorder({ recording, disabled, onRecorded, onRemove, onActi
   }, [busy])
 
   return (
-    <section
-      aria-labelledby="call-recorder-title"
-      className="flex flex-col rounded-2xl border border-border bg-card p-5 shadow-card sm:p-6"
+    <FormCard
+      titleId="call-recorder-title"
+      step="02b"
+      title="Record the call"
+      description="Record management speaking, then check it against the proof. Recordings are added to the list above."
     >
-      <header className="mb-4 flex items-baseline gap-3">
-        <span className="font-mono text-xs text-muted-foreground tabular-nums">02b</span>
-        <div className="min-w-0">
-          <h2 id="call-recorder-title" className="text-base font-semibold tracking-tight">
-            Record the call
-          </h2>
-          <p className="mt-0.5 text-sm text-muted-foreground">
-            Record management speaking, then check it against the proof. Recordings are added to the list above.
-          </p>
-        </div>
-      </header>
-
-      {checking ? null : unsupported ? (
+      {checking ? (
+        <p className="text-sm text-muted-foreground">Checking whether this browser can record…</p>
+      ) : unsupported ? (
         <p className="text-sm text-muted-foreground">{UNSUPPORTED_MESSAGE}</p>
       ) : (
         <div className="flex flex-col gap-4">
@@ -196,7 +189,7 @@ export function CallRecorder({ recording, disabled, onRecorded, onRemove, onActi
           )}
         </div>
       )}
-    </section>
+    </FormCard>
   )
 }
 

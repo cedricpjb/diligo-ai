@@ -13,7 +13,7 @@ export default function NewInvestigationPage() {
         <h1 className="text-[28px] leading-[1.15] font-semibold tracking-tight text-balance sm:text-4xl">
           Check what management said against the proof
         </h1>
-        <p className="mt-3 text-[15px] leading-relaxed text-pretty text-muted-foreground sm:text-base">
+        <p className="mt-3 text-sm leading-relaxed text-pretty text-muted-foreground">
           Add the call or the deck, then the documents behind it. Every claim comes back as YES,
           NO or NEEDS REVIEW, with the quote that decided it.
         </p>

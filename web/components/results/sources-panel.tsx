@@ -40,7 +40,7 @@ export function SourcesPanel({ usage }: { usage: SourceUsage[] }) {
                   <Icon className="size-4" />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium break-all text-foreground">{source.name}</p>
+                  <p className="text-sm font-semibold break-all text-foreground">{source.name}</p>
                   <p className="mt-0.5 text-xs text-muted-foreground">
                     {source.type === "sec" ? "SEC filing" : "Uploaded file"}
                     {source.date && ` · ${source.date}`}

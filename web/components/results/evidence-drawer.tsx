@@ -68,7 +68,7 @@ export function EvidenceDrawer({
                   {PRIORITY_LABEL[finding.priority]} priority
                 </span>
               </div>
-              <SheetTitle className="text-lg leading-snug font-semibold tracking-tight text-balance">
+              <SheetTitle className="text-base leading-snug font-semibold tracking-tight text-balance">
                 {finding.claim}
               </SheetTitle>
               <SheetDescription className="sr-only">
@@ -81,7 +81,7 @@ export function EvidenceDrawer({
                 <div className="flex items-start gap-3 rounded-xl border border-dashed border-white/20 bg-white/[0.02] px-3.5 py-3 text-sm">
                   <FlaskConical className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
                   <p className="text-muted-foreground">
-                    <span className="font-medium text-foreground">Mocked result.</span> A service
+                    <span className="font-semibold text-foreground">Mocked result.</span> A service
                     key was missing, so the server used placeholder results for this finding. Check
                     it by hand before relying on it.
                   </p>
@@ -152,7 +152,7 @@ function Section({
 
 function Quote({ children }: { children: React.ReactNode }) {
   return (
-    <blockquote className="border-l-2 border-white/20 py-0.5 pl-4 text-[15px] leading-relaxed text-foreground">
+    <blockquote className="border-l-2 border-white/20 py-0.5 pl-4 text-sm leading-relaxed text-foreground">
       {children}
     </blockquote>
   )
@@ -257,7 +257,7 @@ function Figure({
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd
         className={cn(
-          "mt-1 text-[15px] tabular-nums",
+          "mt-1 text-sm tabular-nums",
           emphasis ? "font-semibold text-foreground" : "text-foreground"
         )}
       >
@@ -295,7 +295,7 @@ function JevSection({ probability }: { probability: number | null }) {
                 style={{ width: `${Math.round(Math.min(Math.max(probability, 0), 1) * 100)}%` }}
               />
             </div>
-            <p className="shrink-0 text-lg leading-none font-semibold tracking-tight tabular-nums">
+            <p className="shrink-0 text-base leading-none font-semibold tracking-tight tabular-nums">
               {value}
             </p>
           </div>

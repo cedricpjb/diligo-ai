@@ -21,6 +21,7 @@ import {
   type ZoneRules,
 } from "@/lib/files"
 import { cn } from "@/lib/utils"
+import { FormCard } from "./form-card"
 
 interface FileDropzoneProps {
   step: string
@@ -71,20 +72,7 @@ export function FileDropzone({
   }
 
   return (
-    <section
-      aria-labelledby={headingId}
-      className="flex flex-col rounded-2xl border border-border bg-card p-5 shadow-card sm:p-6"
-    >
-      <header className="mb-4 flex items-baseline gap-3">
-        <span className="font-mono text-xs text-muted-foreground tabular-nums">{step}</span>
-        <div className="min-w-0">
-          <h2 id={headingId} className="text-base font-semibold tracking-tight">
-            {title}
-          </h2>
-          <p className="mt-0.5 text-sm text-muted-foreground">{description}</p>
-        </div>
-      </header>
-
+    <FormCard titleId={headingId} step={step} title={title} description={description}>
       <div
         onDragEnter={(event) => {
           event.preventDefault()
@@ -135,7 +123,7 @@ export function FileDropzone({
             <Upload className="size-5" />
           </span>
           <span className="text-sm">
-            <span className="font-medium text-foreground">
+            <span className="font-semibold text-foreground">
               {dragging ? (
                 "Drop to add the files"
               ) : (
@@ -166,7 +154,7 @@ export function FileDropzone({
       </div>
 
       {error && (
-        <p id={errorId} role="alert" className="mt-3 flex items-center gap-2 text-sm text-destructive">
+        <p id={errorId} role="alert" className="flex items-center gap-2 text-sm text-destructive">
           <AlertCircle className="size-4 shrink-0" aria-hidden />
           {error}
         </p>
@@ -175,10 +163,10 @@ export function FileDropzone({
       {rejections.length > 0 && (
         <div
           role="alert"
-          className="mt-3 rounded-lg border border-destructive/30 bg-destructive/[0.06] px-3.5 py-3 text-sm"
+          className="rounded-lg border border-destructive/30 bg-destructive/[0.06] px-3.5 py-3 text-sm"
         >
           <div className="flex items-start justify-between gap-3">
-            <p className="flex items-center gap-2 font-medium text-foreground">
+            <p className="flex items-center gap-2 font-semibold text-foreground">
               <AlertCircle className="size-4 shrink-0 text-destructive" aria-hidden />
               {rejections.length === 1
                 ? "1 file was not added"
@@ -207,7 +195,7 @@ export function FileDropzone({
       )}
 
       {items.length > 0 && (
-        <ul aria-label={`${title} files`} className="mt-4 flex flex-col gap-2">
+        <ul aria-label={`${title} files`} className="flex flex-col gap-2">
           {items.map((item) => {
             const Icon = KIND_ICON[item.kind]
             const ext = extensionOf(item.file.name).toUpperCase()
@@ -240,6 +228,6 @@ export function FileDropzone({
           })}
         </ul>
       )}
-    </section>
+    </FormCard>
   )
 }

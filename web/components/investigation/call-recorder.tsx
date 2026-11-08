@@ -102,7 +102,6 @@ export function CallRecorder({ recording, disabled, onRecorded, onRemove, onActi
   return (
     <FormCard
       titleId="call-recorder-title"
-      step="02b"
       title="Record the call"
       description="Record management speaking, then check it against the proof. Recordings are added to the list above."
     >

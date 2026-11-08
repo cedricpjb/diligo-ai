@@ -60,7 +60,10 @@ and source name; the deterministic contract-status rule below is unchanged.
       "gap_pct": string | null,
       "priority": "high" | "medium" | "low",
       "next_action": string,
-      "mocked": boolean
+      "mocked": boolean,
+      "start_ms"?: number | null,
+      "end_ms"?: number | null,
+      "audio_file_id"?: string
     }
   ],
   "sources": [
@@ -87,6 +90,8 @@ and source name; the deterministic contract-status rule below is unchanged.
 - `jev_probability` is a number between 0 and 1, or `null` when Jev was not called.
 - `explanation` is one or two plain sentences written by the reasoning model. It is never used for math.
 - `claim_source.timestamp_start` and `claim_source.timestamp_end` are seconds into the audio. They are `null` when the claim did not come from audio. `speaker` is `null` when unknown or when the claim did not come from audio.
+- `start_ms` and `end_ms` are optional integers: milliseconds into the audio where the claim is spoken. They are present only on findings whose claim came from audio, and `null` when the timing is unknown. They are absent (or `null`) for text claims, and clients should treat absent and `null` the same.
+- `audio_file_id` is an optional string that identifies the uploaded recording for `GET /api/clip`. It is present only on findings whose claim came from audio and whose recording was kept (see Retention under `GET /api/clip`).
 - `mocked` is `true` when the finding used mock results (see Mock mode), otherwise `false`.
 
 ### Transcript
@@ -122,6 +127,50 @@ Errors return status `400` (bad input) or `500` (server failure) with this body:
 - Money values (`claimed_usd`, `proof_usd`, `gap_usd`) are decimal strings in USD, for example `"1250000.00"`. Never floats.
 - `gap_pct` is also a decimal string, for example `"6.00"`.
 - A `quote` must appear word for word in its source text. For audio, the source text is the transcript.
+
+## GET /api/clip
+
+Returns a short audio segment for a finding that came from audio. Use the finding's `audio_file_id` as `file`, and its `start_ms` and `end_ms` as the offsets.
+
+### Request
+
+Query parameters. Each must appear exactly once; any other parameter is rejected.
+
+| Parameter  | Type    | Required | Notes                                                                                                     |
+| ---------- | ------- | -------- | --------------------------------------------------------------------------------------------------------- |
+| `file`     | string  | yes      | The `audio_file_id` from a finding. It is an ID issued by the backend, never a path or a filename.          |
+| `start_ms` | integer | yes      | Whole milliseconds, 0 or more.                                                                            |
+| `end_ms`   | integer | yes      | Whole milliseconds. Must be greater than `start_ms`, at most 60,000 after it, and not past the end of the recording. |
+
+### Response 200
+
+The audio bytes, with these headers:
+
+| Header           | Value                                                                  |
+| ---------------- | ---------------------------------------------------------------------- |
+| `Content-Type`   | `audio/wav` for `segment`, otherwise the type of the uploaded file.     |
+| `X-Clip-Start-Ms` | The requested `start_ms`.                                             |
+| `X-Clip-End-Ms`   | The requested `end_ms`.                                               |
+| `X-Clip-Mode`     | `segment` or `whole-file`.                                            |
+
+- `segment`: a WAV file containing only the requested span.
+- `whole-file`: the whole original recording, returned because the backend could not cut the span. The client must seek to `X-Clip-Start-Ms` and stop at `X-Clip-End-Ms`. `m4a` recordings are always returned this way.
+
+### Errors
+
+Status `400` with `{ "error": "string" }` for:
+
+- A bad ID: `file` is not a valid ID, or it is not an ID the backend issued (unknown or expired). Path traversal such as `../x`, absolute paths and Windows paths are never read as paths; they are rejected as bad IDs.
+- Malformed parameters: a missing, repeated or unknown parameter, or an offset that is not a whole, non-negative number.
+- Bad range: `end_ms` is not greater than `start_ms`, or the span is longer than 60 seconds.
+- Out of range: the range starts or ends past the end of the recording, wholly or partly. This is checked in both modes.
+- A method other than `GET`.
+
+Status `500` with the same body if the backend could not cut the span.
+
+### Retention
+
+Recordings are kept in memory only and are never written to disk. A recording expires one hour after its upload, and the backend keeps at most 100 recordings at a time: a `POST /api/check` that uploads audio while 100 are held returns `400`. Recordings are lost when the backend restarts. A recording whose duration cannot be read is not kept, and its findings have no `audio_file_id`.
 
 ## Mock response
 

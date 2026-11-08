@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { once } from 'node:events';
+import { readdir, readFile } from 'node:fs/promises';
+import { EventEmitter, once } from 'node:events';
+import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { PassThrough } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { createApp, MAX_REQUEST_BYTES } from '../src/app.js';
@@ -9,7 +12,10 @@ import { ENV_FILE, loadConfig, parseConfig } from '../src/config.js';
 import { contractRows, extractClaims, normalizePeriod } from '../src/extract.js';
 import { createJev, type Jev, type Transport } from '../src/jev.js';
 import { compareMoney, containsMoney, decimal, parseMoney } from '../src/money.js';
-import { createTranscriber } from '../src/transcribe.js';
+import { createMockTranscriber, createTranscriber } from '../src/transcribe.js';
+import { AudioStore, createFfmpegRenderer, MAX_RECORDINGS, type Spawn } from '../src/clips.js';
+import { recordingDurationMs } from '../src/audio-duration.js';
+import { BadInput, parseUploads } from '../src/uploads.js';
 import { filingFigures, legacyFigures } from '../src/filing.js';
 import { createClaude, explainFinding } from '../src/claude.js';
 import { bareMoneyAmount, claimSchema, claimsSchema, createClaimExtractor, signedContractsAssertion, splitChunks, type ExtractionNote } from '../src/extract.js';
@@ -409,12 +415,19 @@ function assertResponse(value: unknown): asserts value is CheckResponse {
   }
   assert.ok(Array.isArray(value.findings));
   for (const finding of value.findings) {
-    assertObject(finding, ['id', 'claim', 'claim_source', 'label', 'decision', 'jev_probability',
+    // Audio findings may add start_ms/end_ms (integers or null) and audio_file_id; text findings have none of them.
+    const core: Record<string, unknown> = { ...finding };
+    delete core.start_ms; delete core.end_ms; delete core.audio_file_id;
+    assertObject(core, ['id', 'claim', 'claim_source', 'label', 'decision', 'jev_probability',
       'explanation', 'proof_source', 'claimed_usd', 'proof_usd', 'gap_usd', 'gap_pct',
       'priority', 'next_action', 'mocked']);
+    assert.equal(finding.start_ms === undefined, finding.end_ms === undefined, 'start_ms and end_ms appear together');
+    for (const offset of [finding.start_ms, finding.end_ms]) if (offset !== undefined) assert.ok(offset === null || Number.isSafeInteger(offset), 'milliseconds');
+    if (finding.audio_file_id !== undefined) assert.equal(typeof finding.audio_file_id, 'string');
     for (const field of ['id', 'claim', 'explanation', 'next_action']) assert.equal(typeof finding[field], 'string', field);
     assert.ok(finding.decision === 'YES' || finding.decision === 'NO' || finding.decision === 'NEEDS_REVIEW');
-    assert.equal(finding.label, { YES: 'supported', NO: 'discrepancy', NEEDS_REVIEW: 'insufficient' }[finding.decision]);
+    const labelFor: Record<string, string> = { YES: 'supported', NO: 'discrepancy', NEEDS_REVIEW: 'insufficient' };
+    assert.equal(finding.label, labelFor[String(finding.decision)]);
     assert.ok(finding.priority === 'high' || finding.priority === 'medium' || finding.priority === 'low');
     assert.equal(typeof finding.mocked, 'boolean');
     if (finding.jev_probability !== null) {
@@ -662,9 +675,11 @@ test('ElevenLabs adapter: multipart audio, word timestamps and optional speakers
       { text: 'USD 100.', start: 1, end: 2, type: 'word', speaker_id: 'speaker_0' }, { text: 'Cash USD 50.', start: 3, end: 4, type: 'word' },
     ] });
   });
+  // Word offsets are measured in the segment-joined text ("segment\nsegment"), which is the claim source text.
   assert.deepEqual(await service.transcribe(new Blob(['audio']), 'call.m4a'), { mocked: false, segments: [
     { source: 'call.m4a', start: 0, end: 2, speaker: 'speaker_0', text: 'Revenue USD 100. ' }, { source: 'call.m4a', start: 3, end: 4, speaker: null, text: 'Cash USD 50.' },
-  ] });
+  ], wordTimings: [{ from: 0, to: 7, start: 0, end: 1 }, { from: 8, to: 16, start: 1, end: 2 }, { from: 18, to: 30, start: 3, end: 4 }] });
+  assert.equal('Revenue USD 100. \nCash USD 50.'.slice(18, 30), 'Cash USD 50.');
 });
 test('ElevenLabs adapter: absent timing or upstream errors are not fabricated', async () => {
   for (const body of [{ text: 'words' }, { text: 'words', words: [] }, { text: 'word', words: [{ text: 'word', start: -1, end: 2 }] }])
@@ -1578,4 +1593,278 @@ test('subjective outlook cannot become Jev-only YES, while a named event can', a
   assert.equal(subjective.jev_probability, null);
   assert.equal(result.findings.find(f => f.claim === named)!.decision, 'YES');
   assert.equal(calls, 1);
+});
+
+// ---- Audio: ElevenLabs timings, no-key behaviour, and the clip route (stubbed services, no live calls) -----------
+test('audio: without ELEVENLABS_API_KEY the transcriber is the explicit mock and makes no request', async () => {
+  const service = createTranscriber(undefined, async () => assert.fail('No key: nothing may be sent to ElevenLabs.'));
+  const result = await service.transcribe(new Blob(['audio']), 'call.mp3');
+  assert.equal(result.mocked, true); assert.equal(result.wordTimings, undefined);
+  assert.equal(result.segments.length, 3);
+});
+
+test('audio: ElevenLabs word timings reach the finding as start_ms and end_ms, with the audio file ID', async () => {
+  const requests: string[] = [];
+  const transport: Transport = async (url, init) => {
+    requests.push(String(url));
+    assert.equal(new Headers(init!.headers).get('xi-api-key'), 'test-only-credential');
+    return Response.json({ text: 'Revenue USD 1250000.00 for the period.', words: [
+      { text: 'Revenue', start: 1.2, end: 1.5, type: 'word', speaker_id: 'speaker_0' },
+      { text: 'USD', start: 1.6, end: 1.9, type: 'word', speaker_id: 'speaker_0' },
+      { text: '1250000.00', start: 2, end: 2.8, type: 'word', speaker_id: 'speaker_0' },
+      { text: 'for', start: 3, end: 3.2, type: 'word', speaker_id: 'speaker_0' },
+      { text: 'the', start: 3.2, end: 3.4, type: 'word', speaker_id: 'speaker_0' },
+      { text: 'period', start: 3.4, end: 3.9, type: 'word', speaker_id: 'speaker_0' },
+    ] });
+  };
+  const body = new FormData();
+  body.set('claims_audio', new File([new Uint8Array([1, 2, 3])], 'call.mp3', { type: 'audio/mpeg' }));
+  body.set('proof_files', new File(['revenue,1250000.00'], 'proof.csv', { type: 'text/csv' }));
+  const { claims, proofs } = await parseUploads(body, createTranscriber('test-only-credential', transport), async () => 'audio-test-id');
+  assert.deepEqual(requests, ['https://api.elevenlabs.io/v1/speech-to-text']);
+  // The claim text is the segment text the word timings are measured against, so the offsets line up.
+  assert.equal(claims[0]!.text, 'Revenue USD 1250000.00 for the period.');
+  const result = await checkClaims(claims, proofs, neverJev, { extract: extractClaims });
+  assertResponse(result);
+  const finding = result.findings.find(item => item.claim === 'Revenue USD 1250000.00')!;
+  assert.ok(finding, 'the revenue claim is found');
+  assert.equal(finding.start_ms, 1200); assert.equal(finding.end_ms, 2800);
+  assert.equal(finding.audio_file_id, 'audio-test-id');
+  assert.equal(finding.decision, 'YES'); assert.equal(finding.claimed_usd, '1250000.00');
+  assert.equal(finding.claim_source.timestamp_start, 1.2);
+});
+
+test('audio: text findings carry no audio fields (start_ms, end_ms, audio_file_id are absent, not null)', async () => {
+  const body = new FormData();
+  body.set('claims_text', 'Revenue USD 1250000.00');
+  body.set('proof_files', new File(['revenue,1250000.00'], 'proof.csv', { type: 'text/csv' }));
+  const { claims, proofs } = await parseUploads(body, createMockTranscriber());
+  const result = await checkClaims(claims, proofs, neverJev, { extract: extractClaims });
+  assertResponse(result);
+  assert.equal(result.findings.length, 1);
+  assert.ok(!('start_ms' in result.findings[0]!) && !('end_ms' in result.findings[0]!) && !('audio_file_id' in result.findings[0]!));
+});
+
+// ---- Clip store: in-memory only, ffmpeg over stdin/stdout, capacity, duration (stubbed; no live services) -------
+// Tiny valid recordings built in memory.
+function wavBytes(ms: number, marker = ''): Buffer {
+  const data = Buffer.alloc(ms * 16); // 8 kHz mono 16-bit: 16 bytes per millisecond
+  data.write(marker, 0, 'latin1');
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0, 'latin1'); header.writeUInt32LE(36 + data.length, 4); header.write('WAVE', 8, 'latin1'); header.write('fmt ', 12, 'latin1');
+  header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22); header.writeUInt32LE(8000, 24);
+  header.writeUInt32LE(16000, 28); header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34); header.write('data', 36, 'latin1'); header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
+}
+function mp3Bytes(frames: number): Buffer { // MPEG-1 Layer III, 128 kbps, 44.1 kHz: 417-byte frames of 1152 samples
+  const frame = Buffer.alloc(417); frame[0] = 0xff; frame[1] = 0xfb; frame[2] = 0x90; frame[3] = 0x00;
+  return Buffer.concat(Array.from({ length: frames }, () => frame));
+}
+function mp4Box(type: string, body: Buffer): Buffer {
+  const header = Buffer.alloc(8); header.writeUInt32BE(8 + body.length, 0); header.write(type, 4, 'latin1');
+  return Buffer.concat([header, body]);
+}
+function m4aBytes(ms: number): Buffer {
+  const mvhd = Buffer.alloc(100); mvhd.writeUInt32BE(1000, 12); mvhd.writeUInt32BE(ms, 16);
+  return Buffer.concat([mp4Box('ftyp', Buffer.from('M4A \0\0\0\0M4A isom', 'latin1')), mp4Box('moov', mp4Box('mvhd', mvhd))]);
+}
+const audioFile = (bytes: Buffer, name: string) => new File([new Uint8Array(bytes)], name);
+// A stand-in for the ffmpeg process: records what it was given on stdin and answers on stdout.
+function fakeFfmpeg(behaviour: { output?: Buffer; code?: number; error?: string } = {}) {
+  const calls: { command: string; args: string[]; options: unknown; stdin: Buffer[] }[] = [];
+  const spawnProcess = ((command: string, args: string[], options: unknown) => {
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), kill() {} });
+    const call = { command, args, options, stdin: [] as Buffer[] }; calls.push(call);
+    if (behaviour.error) { setImmediate(() => child.emit('error', Object.assign(new Error('spawn'), { code: behaviour.error }))); return child; }
+    child.stdin.on('data', (chunk: Buffer) => call.stdin.push(chunk));
+    child.stdin.on('end', () => setImmediate(() => { if (behaviour.output) child.stdout.write(behaviour.output); child.stdout.end(); child.emit('close', behaviour.code ?? 0); }));
+    return child;
+  }) as unknown as Spawn;
+  return { spawnProcess, calls };
+}
+const query = (id: string | null, start: number, end: number) => new URLSearchParams(`file=${id}&start_ms=${start}&end_ms=${end}`);
+
+test('duration: read from the WAV, MP3 and M4A containers in memory; anything else is unreadable', () => {
+  assert.equal(recordingDurationMs(wavBytes(1500), 'wav'), 1500);
+  assert.equal(recordingDurationMs(mp3Bytes(100), 'mp3'), 2612); // 100 x 1152 / 44100 s
+  assert.equal(recordingDurationMs(Buffer.concat([Buffer.from('ID3\x03\x00\x00\x00\x00\x00\x0a', 'latin1'), Buffer.alloc(10), mp3Bytes(100)]), 'mp3'), 2612);
+  assert.equal(recordingDurationMs(m4aBytes(3000), 'm4a'), 3000);
+  // A WAV that announces more data than it holds counts only what is there.
+  const truncated = wavBytes(1000); truncated.writeUInt32LE(0xffffffff, 40);
+  assert.equal(recordingDurationMs(truncated, 'wav'), 1000);
+  for (const [bytes, extension] of [[Buffer.from('mock audio'), 'm4a'], [Buffer.from('mock audio'), 'mp3'], [Buffer.from('mock audio'), 'wav'],
+    [mp3Bytes(2), 'mp3'], [wavBytes(1000).subarray(0, 30), 'wav'], [Buffer.alloc(0), 'mp3']] as const)
+    assert.equal(recordingDurationMs(bytes, extension), null, extension);
+});
+
+test('clip store: only IDs this store issued are served; paths, traversal and malformed requests are rejected', async () => {
+  const store = new AudioStore(async () => Buffer.from('WAV'));
+  const id = await store.save(audioFile(wavBytes(5000), 'call.wav'));
+  assert.ok(id);
+  for (const text of [
+    `file=../../api/.env&start_ms=0&end_ms=1000`, `file=..%2F..%2Fsecret&start_ms=0&end_ms=1000`,
+    `file=${encodeURIComponent('/etc/passwd')}&start_ms=0&end_ms=1000`, `file=${encodeURIComponent('C:\\Windows\\win.ini')}&start_ms=0&end_ms=1000`,
+    `file=00000000-0000-4000-8000-000000000000&start_ms=0&end_ms=1000`, // well-formed, but never issued here
+    `file=${id}&file=${id}&start_ms=0&end_ms=1000`, `file=${id}&start_ms=-1&end_ms=1000`, `file=${id}&start_ms=1.5&end_ms=1000`,
+    `file=${id}&start_ms=2000&end_ms=2000`, `file=${id}&start_ms=0&end_ms=60001`, `file=${id}&start_ms=0`,
+    `file=${id}&start_ms=0&end_ms=1000&path=/etc/passwd`,
+  ]) await assert.rejects(store.clip(new URLSearchParams(text)), BadInput, text);
+  assert.equal((await store.clip(query(id, 0, 1000))).bytes.toString(), 'WAV');
+});
+
+test('clip ranges are checked against the recording duration in both modes, and a range past the end is refused', async () => {
+  const original = wavBytes(1500);
+  const modes: [string, AudioStore][] = [
+    ['ffmpeg segment mode', new AudioStore(async () => Buffer.from('RIFF'))],
+    ['whole-file mode (no ffmpeg)', new AudioStore(async () => null)],
+    ['whole-file mode (m4a is never piped)', new AudioStore(async () => Buffer.from('RIFF'))],
+  ];
+  for (const [mode, store] of modes) {
+    const id = await store.save(mode.includes('m4a') ? audioFile(m4aBytes(1500), 'call.m4a') : audioFile(original, 'call.wav'));
+    assert.ok(id, mode);
+    const inside = await store.clip(query(id, 500, 1500)); // ends exactly at the end: allowed
+    assert.equal(inside.whole, mode.startsWith('whole'), mode);
+    for (const [start, end] of [[500, 1501], [1000, 2500], [1500, 2000], [2000, 3000], [1501, 1502]] as const)
+      await assert.rejects(store.clip(query(id, start, end)), (error: unknown) => error instanceof BadInput, `${mode}: ${start}-${end}`);
+  }
+  // Through HTTP the same refusals are 400 JSON errors.
+  const store = new AudioStore(async () => Buffer.from('RIFF'));
+  const id = (await store.save(audioFile(original, 'call.wav')))!;
+  await withServer(async url => {
+    const endpoint = url.replace('/api/check', '/api/clip');
+    assert.equal((await fetch(`${endpoint}?file=${id}&start_ms=500&end_ms=1500`)).status, 200);
+    for (const range of ['start_ms=500&end_ms=1501', 'start_ms=2000&end_ms=3000']) {
+      const refused = await fetch(`${endpoint}?file=${id}&${range}`);
+      assert.equal(refused.status, 400, range); assert.equal(typeof ((await refused.json()) as { error?: unknown }).error, 'string');
+    }
+  }, { audioStore: store, jev: neverJev });
+});
+
+test('clip store: never more than 100 recordings, even when far more uploads arrive at once', async () => {
+  const store = new AudioStore(async () => null);
+  const recording = wavBytes(100);
+  const results = await Promise.allSettled(Array.from({ length: 150 }, () => store.save(audioFile(recording, 'call.wav'))));
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, MAX_RECORDINGS);
+  assert.equal(store.size, MAX_RECORDINGS);
+  const refused = results.filter(result => result.status === 'rejected');
+  assert.equal(refused.length, 50);
+  assert.ok(refused.every(result => (result as PromiseRejectedResult).reason instanceof BadInput));
+  // Slots claimed by uploads that fail are released, so failures never use up capacity.
+  const fresh = new AudioStore(async () => null);
+  const unreadable = await Promise.all(Array.from({ length: 150 }, () => fresh.save(audioFile(Buffer.from('mock audio'), 'call.mp3')).catch(() => 'full')));
+  assert.equal(unreadable.filter(result => result === null).length, MAX_RECORDINGS, 'the first 100 claimed slots; each was released');
+  assert.equal(fresh.size, 0);
+  const afterwards = await Promise.allSettled(Array.from({ length: 100 }, () => fresh.save(audioFile(recording, 'call.wav'))));
+  assert.ok(afterwards.every(result => result.status === 'fulfilled' && result.value !== null));
+  assert.equal(fresh.size, MAX_RECORDINGS);
+});
+
+test('ffmpeg renderer: the recording is piped over stdin and read from stdout; nothing is passed as a path', async () => {
+  const marker = `marker-${randomBytes(12).toString('hex')}`;
+  const recording = wavBytes(5000, marker);
+  const fake = fakeFfmpeg({ output: Buffer.from('RIFFCLIP') });
+  const store = new AudioStore(createFfmpegRenderer(fake.spawnProcess));
+  const id = await store.save(audioFile(recording, 'call.wav'));
+  const clip = await store.clip(query(id, 1200, 4500));
+  assert.deepEqual([clip.type, clip.whole, clip.bytes.toString()], ['audio/wav', false, 'RIFFCLIP']);
+  assert.equal(fake.calls.length, 1);
+  const [call] = fake.calls;
+  assert.equal(call!.command, 'ffmpeg');
+  assert.deepEqual(Buffer.concat(call!.stdin), recording);
+  assert.ok(call!.args.includes('pipe:0') && call!.args.includes('pipe:1'));
+  assert.equal(call!.args[call!.args.indexOf('-ss') + 1], '1.2'); assert.equal(call!.args[call!.args.indexOf('-t') + 1], '3.3');
+  assert.ok(call!.args.every(argument => !/[\\/]/.test(argument.replace(/^pipe:[01]$/, ''))), 'no argument is a file path');
+  assert.ok(!call!.args.join(' ').includes(marker));
+  // m4a cannot be read reliably from a pipe, so it is served whole instead of being written to disk.
+  const m4a = await store.save(audioFile(m4aBytes(5000), 'call.m4a'));
+  const whole = await store.clip(query(m4a, 0, 1000));
+  assert.deepEqual([whole.whole, whole.type], [true, 'audio/mp4']); assert.equal(fake.calls.length, 1, 'ffmpeg was not started for m4a');
+});
+
+test('ffmpeg renderer: a missing binary means whole-file; failures are generic; empty output is a 400', async () => {
+  const recording = wavBytes(5000);
+  const missing = new AudioStore(createFfmpegRenderer(fakeFfmpeg({ error: 'ENOENT' }).spawnProcess));
+  const whole = await missing.clip(query(await missing.save(audioFile(recording, 'call.wav')), 0, 1000));
+  assert.deepEqual([whole.whole, whole.type], [true, 'audio/wav']); assert.deepEqual(whole.bytes, recording);
+  const failing = new AudioStore(createFfmpegRenderer(fakeFfmpeg({ output: Buffer.from('x'), code: 1 }).spawnProcess));
+  await assert.rejects(failing.clip(query(await failing.save(audioFile(recording, 'call.wav')), 0, 1000)), (error: unknown) => error instanceof Error && !(error instanceof BadInput));
+  const silent = new AudioStore(createFfmpegRenderer(fakeFfmpeg({}).spawnProcess));
+  await assert.rejects(silent.clip(query(await silent.save(audioFile(recording, 'call.wav')), 0, 1000)), BadInput);
+});
+
+test('no temporary file: a render creates nothing under any OS temp directory, and clips.ts has no file-system code', async () => {
+  const marker = `marker-${randomBytes(16).toString('hex')}`;
+  const directories = [...new Set([tmpdir(), process.env.TEMP, process.env.TMP, process.env.TMPDIR, '/tmp'].filter((entry): entry is string => !!entry))];
+  const snapshot = async () => {
+    const paths = new Map<string, boolean>();
+    for (const directory of directories) {
+      const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        paths.set(`${directory}/${entry.name}`, entry.isDirectory());
+        if (entry.isDirectory()) for (const inner of await readdir(`${directory}/${entry.name}`, { withFileTypes: true }).catch(() => []))
+          paths.set(`${directory}/${entry.name}/${inner.name}`, inner.isDirectory());
+      }
+    }
+    return paths;
+  };
+  const before = await snapshot();
+  const store = new AudioStore(createFfmpegRenderer(fakeFfmpeg({ output: Buffer.from('RIFFCLIP') }).spawnProcess));
+  const id = await store.save(audioFile(wavBytes(5000, marker), 'call.wav'));
+  await store.clip(query(id, 0, 1000));
+  const after = await snapshot();
+  const created = [...after].filter(([path, directory]) => !before.has(path) && !directory).map(([path]) => path);
+  for (const path of created) {
+    const content = await readFile(path).catch(() => Buffer.alloc(0));
+    assert.ok(!content.includes(marker), 'the recording was written to a temporary file');
+  }
+  assert.ok([...after.keys()].every(path => before.has(path) || !/^diligo-/.test(path.split('/').pop()!)), 'no temp entry named for this feature');
+  // And structurally: the module cannot write files, because it does not import anything that can.
+  const source = await readFile(new URL('../../src/clips.ts', import.meta.url), 'utf8');
+  assert.ok(!/node:fs|node:os|mkdtemp|writeFile|createWriteStream|tmpdir|unlink/.test(source), 'clips.ts must not use the file system');
+});
+
+test('clip store: ffmpeg output is served as WAV; without ffmpeg the whole recording is served with its offsets', async () => {
+  const original = wavBytes(5000);
+  const withFfmpeg = new AudioStore(async (input, extension, start, end) => { assert.deepEqual(input, original); assert.equal(extension, 'wav'); assert.equal(start, 1200); assert.equal(end, 4500); return Buffer.from('RIFF'); });
+  const rendered = await withFfmpeg.clip(query(await withFfmpeg.save(audioFile(original, 'call.wav')), 1200, 4500));
+  assert.deepEqual([rendered.type, rendered.whole, rendered.startMs, rendered.endMs, rendered.bytes.toString()], ['audio/wav', false, 1200, 4500, 'RIFF']);
+  const without = new AudioStore(async () => null);
+  const mp3 = mp3Bytes(200); // 5.2 seconds
+  const whole = await without.clip(query(await without.save(audioFile(mp3, 'call.mp3')), 1200, 4500));
+  assert.deepEqual([whole.type, whole.whole, whole.bytes], ['audio/mpeg', true, mp3]);
+});
+
+test('clip store: unsupported and unreadable uploads are not kept, and recordings expire after an hour', async () => {
+  let clock = 1_000_000;
+  const store = new AudioStore(async () => Buffer.from('WAV'), () => clock);
+  await assert.rejects(store.save(new File(['x'], 'payload.html', { type: 'text/html' })), BadInput);
+  await assert.rejects(store.save(new File([], 'empty.mp3', { type: 'audio/mpeg' })), BadInput);
+  assert.equal(await store.save(audioFile(Buffer.from('mock audio'), 'call.m4a')), null, 'bytes that are not an M4A are not kept');
+  assert.equal(store.size, 0);
+  const id = await store.save(audioFile(wavBytes(2000), 'call.wav'));
+  clock += 60 * 60 * 1000 + 1;
+  await assert.rejects(store.clip(query(id, 0, 1000)), BadInput);
+  assert.equal(store.size, 0);
+});
+
+test('HTTP: GET /api/clip serves an uploaded span and rejects anything outside the store with JSON errors', async () => {
+  const store = new AudioStore(async () => Buffer.from('RIFFWAVE'));
+  const id = await store.save(audioFile(wavBytes(5000), 'call.wav'));
+  const base = (url: string) => url.replace('/api/check', '/api/clip');
+  await withServer(async url => {
+    const ok = await fetch(`${base(url)}?file=${id}&start_ms=1200&end_ms=4500`);
+    assert.equal(ok.status, 200); assert.equal(ok.headers.get('content-type'), 'audio/wav');
+    assert.equal(ok.headers.get('x-clip-start-ms'), '1200'); assert.equal(ok.headers.get('x-clip-end-ms'), '4500');
+    assert.equal(ok.headers.get('x-clip-mode'), 'segment'); assert.equal(ok.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(Buffer.from(await ok.arrayBuffer()).toString(), 'RIFFWAVE');
+    for (const text of ['file=..%2F..%2Fapi%2F.env&start_ms=0&end_ms=1000', `file=${encodeURIComponent('/etc/passwd')}&start_ms=0&end_ms=1000`,
+      `file=${id}&start_ms=0&end_ms=99999`]) {
+      const rejected = await fetch(`${base(url)}?${text}`);
+      assert.equal(rejected.status, 400, text);
+      assert.equal(rejected.headers.get('content-type'), 'application/json');
+      assert.equal(typeof ((await rejected.json()) as { error?: unknown }).error, 'string');
+    }
+    const post = await fetch(`${base(url)}?file=${id}&start_ms=0&end_ms=1000`, { method: 'POST' });
+    assert.equal(post.status, 400);
+  }, { audioStore: store, jev: neverJev });
 });

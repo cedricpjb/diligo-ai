@@ -4,8 +4,9 @@ export interface Segment {
   source: string; start: number; end: number; speaker: string | null; text: string;
 }
 export interface SourceText {
-  name: string; text: string; mocked: boolean; segments?: Segment[];
+  name: string; text: string; mocked: boolean; segments?: Segment[]; audioFileId?: string; wordTimings?: WordTiming[];
 }
+export interface WordTiming { from: number; to: number; start: number; end: number }
 export interface Money { cents: bigint; quantum: bigint }
 export interface Claim {
   metric: Metric | 'contracts' | 'text' | 'contract' | 'other-money'; quote: string; source: SourceText;
@@ -24,6 +25,7 @@ export interface Claim {
 }
 export interface Finding {
   id: string; claim: string;
+  start_ms?: number | null; end_ms?: number | null; audio_file_id?: string;
   claim_source: { name: string; quote: string; timestamp_start: number | null; timestamp_end: number | null; speaker: string | null };
   label: 'supported' | 'discrepancy' | 'insufficient'; decision: Decision;
   jev_probability: number | null; explanation: string;

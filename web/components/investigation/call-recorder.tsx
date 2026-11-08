@@ -5,16 +5,20 @@ import { AlertCircle, Mic, RotateCcw, Square, Trash2 } from "lucide-react"
 
 import type { UploadItem } from "@/lib/files"
 import {
-  CONVERSION_MESSAGE,
-  MAX_RECORDING_MS,
   RECORDING_BITRATE,
   UNSUPPORTED_MESSAGE,
-  convertToWav,
   formatElapsed,
-  microphoneMessage,
   pickRecordingFormat,
+  toUploadFile,
   type RecordingFormat,
 } from "@/lib/recording"
+import {
+  RecordingSession,
+  type SessionDeps,
+  type SessionStatus,
+  type StreamLike,
+} from "@/lib/recording-session"
+import { usePreviewUrl } from "@/lib/preview-url"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -29,8 +33,6 @@ interface CallRecorderProps {
   onActiveChange?: (active: boolean) => void
 }
 
-type Status = "idle" | "requesting" | "recording" | "converting"
-
 // Browser support is only known in the browser. The server render says nothing about it (undefined), so a browser
 // that can record never flashes a "not available" note before its buttons appear. null means unsupported.
 const noSubscribe = () => () => {}
@@ -40,121 +42,52 @@ function readSupport(): RecordingFormat | null {
   return pickRecordingFormat((mimeType) => MediaRecorder.isTypeSupported(mimeType))
 }
 
+// The browser's own APIs, used only when the user acts (never at import or render time).
+const browser: SessionDeps = {
+  getUserMedia: () => navigator.mediaDevices.getUserMedia({ audio: true }) as Promise<StreamLike>,
+  createRecorder: (stream, format) =>
+    new MediaRecorder(stream as MediaStream, { mimeType: format.mimeType, audioBitsPerSecond: RECORDING_BITRATE }) as unknown as ReturnType<SessionDeps["createRecorder"]>,
+  toUploadFile,
+  now: () => Date.now(),
+  setInterval: (callback, ms) => setInterval(callback, ms),
+  clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+}
+
 export function CallRecorder({ recording, disabled, onRecorded, onRemove, onActiveChange }: CallRecorderProps) {
   const format = useSyncExternalStore(noSubscribe, readSupport, () => undefined)
-  const [status, setStatus] = useState<Status>("idle")
+  const [status, setStatus] = useState<SessionStatus>("idle")
   const [elapsed, setElapsed] = useState(0)
   const [note, setNote] = useState<string | null>(null)
 
-  const recorderRef = useRef<MediaRecorder | null>(null)
-  const streamRef = useRef<MediaStream | null>(null)
-  const chunksRef = useRef<Blob[]>([])
-  const startedRef = useRef(0)
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const discardRef = useRef(false)
-
-  // The callback runs when recording stops, which can be minutes later. Read the latest one at that moment, so
-  // files added or removed while recording are taken into account.
+  // The callbacks run later (when recording stops, possibly minutes on). Read the latest ones at that moment.
   const latest = useRef({ onRecorded, onActiveChange })
   useEffect(() => {
     latest.current = { onRecorded, onActiveChange }
   })
 
-  function clearTimer() {
-    if (timerRef.current) clearInterval(timerRef.current)
-    timerRef.current = null
+  // One session per component. Its events write to state only while it is current; see recording-session.ts.
+  // One session per component, created the first time the user starts a recording (never during render).
+  const sessionRef = useRef<RecordingSession | null>(null)
+  function session(): RecordingSession {
+    if (sessionRef.current === null) {
+      sessionRef.current = new RecordingSession(browser, {
+        status: setStatus,
+        elapsed: setElapsed,
+        note: setNote,
+        recorded: (file) => latest.current.onRecorded(file),
+      })
+    }
+    return sessionRef.current
   }
 
-  function releaseMicrophone() {
-    streamRef.current?.getTracks().forEach((track) => track.stop())
-    streamRef.current = null
-  }
-
-  // Stop the microphone and the timer if the form goes away while recording. Nothing is kept.
+  // Ends every pending permission request, conversion and recording when the form goes away. Strict Mode runs
+  // this cleanup once on mount; the session starts again cleanly, so nothing else is needed.
   useEffect(() => {
     return () => {
-      discardRef.current = true
-      clearTimer()
-      if (recorderRef.current && recorderRef.current.state !== "inactive") recorderRef.current.stop()
-      releaseMicrophone()
+      sessionRef.current?.dispose()
       latest.current.onActiveChange?.(false)
     }
   }, [])
-
-  async function finish(mimeType: string) {
-    clearTimer()
-    releaseMicrophone()
-    const chunks = chunksRef.current
-    chunksRef.current = []
-    recorderRef.current = null
-    if (discardRef.current) return
-    setStatus("converting")
-    try {
-      const blob = new Blob(chunks, { type: mimeType })
-      const isMp4 = mimeType.startsWith("audio/mp4")
-      const file = isMp4
-        ? new File([blob], "recording.m4a", { type: "audio/mp4" })
-        : new File([await convertToWav(blob)], "recording.wav", { type: "audio/wav" })
-      const problem = latest.current.onRecorded(file)
-      setNote(problem)
-    } catch {
-      setNote(CONVERSION_MESSAGE)
-    } finally {
-      setStatus("idle")
-      setElapsed(0)
-    }
-  }
-
-  async function start() {
-    if (!format) return
-    setNote(null)
-    setStatus("requesting")
-    let stream: MediaStream
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    } catch (error) {
-      setStatus("idle")
-      setNote(microphoneMessage(error instanceof DOMException ? error.name : undefined))
-      return
-    }
-    discardRef.current = false
-    streamRef.current = stream
-    chunksRef.current = []
-    let recorder: MediaRecorder
-    try {
-      recorder = new MediaRecorder(stream, { mimeType: format.mimeType, audioBitsPerSecond: RECORDING_BITRATE })
-    } catch {
-      releaseMicrophone()
-      setStatus("idle")
-      setNote(UNSUPPORTED_MESSAGE)
-      return
-    }
-    const recordedType = recorder.mimeType || format.mimeType
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) chunksRef.current.push(event.data)
-    }
-    recorder.onstop = () => void finish(recordedType)
-    recorderRef.current = recorder
-    recorder.start(1000)
-    startedRef.current = Date.now()
-    setElapsed(0)
-    setStatus("recording")
-    timerRef.current = setInterval(() => {
-      const ms = Date.now() - startedRef.current
-      if (ms >= MAX_RECORDING_MS) {
-        stop()
-        setNote("The recording stopped at six minutes, the longest one kept.")
-        return
-      }
-      setElapsed(ms)
-    }, 250)
-  }
-
-  function stop() {
-    clearTimer()
-    const recorder = recorderRef.current
-    if (recorder && recorder.state !== "inactive") recorder.stop()
-  }
 
   const unsupported = format === null
   const busy = status !== "idle"
@@ -191,7 +124,7 @@ export function CallRecorder({ recording, disabled, onRecorded, onRemove, onActi
               <Button
                 type="button"
                 variant="destructive"
-                onClick={stop}
+                onClick={() => sessionRef.current?.stop()}
                 disabled={disabled}
                 className="h-10 gap-2 rounded-lg px-4"
               >
@@ -202,7 +135,7 @@ export function CallRecorder({ recording, disabled, onRecorded, onRemove, onActi
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => void start()}
+                onClick={() => void session().start(format ?? null)}
                 disabled={disabled || busy}
                 className="h-10 gap-2 rounded-lg px-4"
               >
@@ -213,7 +146,7 @@ export function CallRecorder({ recording, disabled, onRecorded, onRemove, onActi
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => void start()}
+                onClick={() => void session().start(format ?? null)}
                 disabled={disabled || busy}
                 className="h-10 gap-2 rounded-lg px-4"
               >
@@ -243,7 +176,13 @@ export function CallRecorder({ recording, disabled, onRecorded, onRemove, onActi
                 status === "recording" ? "text-foreground" : "text-muted-foreground"
               )}
             >
-              {status === "recording" ? formatElapsed(elapsed) : status === "converting" ? "Preparing…" : status === "requesting" ? "Waiting for the microphone…" : ""}
+              {status === "recording"
+                ? formatElapsed(elapsed)
+                : status === "converting"
+                  ? "Preparing…"
+                  : status === "requesting"
+                    ? "Waiting for the microphone…"
+                    : ""}
             </span>
           </div>
 
@@ -262,13 +201,13 @@ export function CallRecorder({ recording, disabled, onRecorded, onRemove, onActi
 }
 
 function Preview({ file }: { file: File }) {
-  // One URL per recording. It is revoked when the recording is replaced or removed, and when the form unmounts.
-  const [url] = useState(() => URL.createObjectURL(file))
-  useEffect(() => () => URL.revokeObjectURL(url), [url])
+  const url = usePreviewUrl(file)
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-xs text-muted-foreground">Preview of the recording</span>
-      <audio controls preload="metadata" src={url} className="w-full max-w-md" aria-label="Preview of the recording" />
+      {url && (
+        <audio controls preload="metadata" src={url} className="w-full max-w-md" aria-label="Preview of the recording" />
+      )}
     </div>
   )
 }

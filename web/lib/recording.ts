@@ -117,3 +117,10 @@ export async function convertToWav(blob: Blob): Promise<ArrayBuffer> {
   const rendered = await offline.startRendering()
   return encodeWav(rendered.getChannelData(0), WAV_SAMPLE_RATE)
 }
+
+/** The file that is uploaded: mp4 as recording.m4a unchanged, webm converted to recording.wav. Browser-only. */
+export async function toUploadFile(blob: Blob, mimeType: string): Promise<File> {
+  return mimeType.startsWith("audio/mp4")
+    ? new File([blob], "recording.m4a", { type: "audio/mp4" })
+    : new File([await convertToWav(blob)], "recording.wav", { type: "audio/wav" })
+}

@@ -29,7 +29,11 @@ export function parseConfig(contents: string) {
   validateThresholds(thresholds);
   const port = env.PORT === undefined ? 3001 : Number(env.PORT);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid API port.');
-  const allowedOrigins = [WEB_ORIGIN, ...parseDevOrigins(env.DEV_CORS_ORIGINS)];
+  const allowedOrigins = [WEB_ORIGIN];
+  if (env.DEV_CORS_ORIGINS?.trim()) {
+    if (env.APP_ENV !== 'development') throw new Error('DEV_CORS_ORIGINS requires APP_ENV=development.');
+    allowedOrigins.push(...parseDevOrigins(env.DEV_CORS_ORIGINS));
+  }
   return { port, thresholds, allowedOrigins, jevKey: env.JEV_API_KEY?.trim() || undefined,
     elevenLabsKey: env.ELEVENLABS_API_KEY?.trim() || undefined,
     anthropicKey: env.ANTHROPIC_API_KEY?.trim() || undefined };

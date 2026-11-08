@@ -839,17 +839,24 @@ test('HTTP: CORS preflight and unrelated origin', async () => withServer(async u
   assert.equal(preflight.status, 204); assert.match(preflight.headers.get('Access-Control-Allow-Methods')!, /POST/);
   assert.equal((await fetch(url, { method: 'POST', body: form(), headers: { Origin: 'https://unrelated.example' } })).headers.get('Access-Control-Allow-Origin'), null);
 }));
-test('CORS: development origins come only from DEV_CORS_ORIGINS and are strictly validated', () => {
+test('CORS: development origins require APP_ENV=development and are strictly validated', () => {
+  const dev = 'APP_ENV=development\n';
   assert.deepEqual(parseConfig('').allowedOrigins, ['http://localhost:3000']);
-  assert.deepEqual(parseConfig('DEV_CORS_ORIGINS=   ').allowedOrigins, ['http://localhost:3000']);
-  assert.deepEqual(parseConfig('DEV_CORS_ORIGINS=http://localhost:3100').allowedOrigins, ['http://localhost:3000', 'http://localhost:3100']);
-  assert.deepEqual(parseConfig('DEV_CORS_ORIGINS=http://localhost:3100, http://localhost:3200').allowedOrigins, ['http://localhost:3000', 'http://localhost:3100', 'http://localhost:3200']);
+  assert.deepEqual(parseConfig(`${dev}DEV_CORS_ORIGINS=   `).allowedOrigins, ['http://localhost:3000']);
+  assert.deepEqual(parseConfig(`${dev}DEV_CORS_ORIGINS=http://localhost:3100`).allowedOrigins, ['http://localhost:3000', 'http://localhost:3100']);
+  assert.deepEqual(parseConfig(`${dev}DEV_CORS_ORIGINS=http://localhost:3100, http://localhost:3200`).allowedOrigins, ['http://localhost:3000', 'http://localhost:3100', 'http://localhost:3200']);
   for (const bad of ['*', 'https://localhost:3100', 'http://127.0.0.1:3100', 'http://example.com', 'http://localhost:3100/', 'http://localhost:3100,', 'http://localhost:3100,*']) {
-    assert.throws(() => parseConfig(`DEV_CORS_ORIGINS=${bad}`), /Invalid development CORS origin/, bad);
+    assert.throws(() => parseConfig(`${dev}DEV_CORS_ORIGINS=${bad}`), /Invalid development CORS origin/, bad);
   }
 });
+test('CORS: production rejects localhost:3100 even when DEV_CORS_ORIGINS is populated', () => {
+  assert.throws(() => parseConfig('DEV_CORS_ORIGINS=http://localhost:3100'), /APP_ENV=development/);
+  assert.throws(() => parseConfig('APP_ENV=production\nDEV_CORS_ORIGINS=http://localhost:3100'), /APP_ENV=development/);
+  assert.throws(() => parseConfig('APP_ENV=staging\nDEV_CORS_ORIGINS=http://localhost:3100'), /APP_ENV=development/);
+  assert.deepEqual(parseConfig('APP_ENV=production').allowedOrigins, ['http://localhost:3000']);
+});
 test('CORS: development permits both localhost origins and keeps unrelated origins disallowed', async () => {
-  const allowedOrigins = parseConfig('DEV_CORS_ORIGINS=http://localhost:3100').allowedOrigins;
+  const allowedOrigins = parseConfig('APP_ENV=development\nDEV_CORS_ORIGINS=http://localhost:3100').allowedOrigins;
   await withServer(async url => {
     for (const origin of ['http://localhost:3000', 'http://localhost:3100']) {
       const preflight = await fetch(url, { method: 'OPTIONS', headers: { Origin: origin } });
@@ -863,8 +870,8 @@ test('CORS: development permits both localhost origins and keeps unrelated origi
     }
   }, { allowedOrigins });
 });
-test('CORS: production configuration does not newly permit localhost:3100', async () => {
-  const allowedOrigins = parseConfig('').allowedOrigins;
+test('CORS: production server does not permit localhost:3100', async () => {
+  const allowedOrigins = parseConfig('APP_ENV=production').allowedOrigins;
   await withServer(async url => {
     assert.equal((await fetch(url, { method: 'OPTIONS', headers: { Origin: 'http://localhost:3000' } })).headers.get('Access-Control-Allow-Origin'), 'http://localhost:3000');
     assert.equal((await fetch(url, { method: 'OPTIONS', headers: { Origin: 'http://localhost:3100' } })).headers.get('Access-Control-Allow-Origin'), null);

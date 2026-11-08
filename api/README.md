@@ -18,7 +18,7 @@ npm start
 without tests use `npm run build`; `npm run dev` builds and starts the server.
 On PowerShell installations that block npm's script shim, use `npm.cmd`.
 The server binds to `127.0.0.1:3001`; CORS permits `http://localhost:3000`, plus any
-origin listed in `DEV_CORS_ORIGINS` (see Configuration).
+origin listed in `DEV_CORS_ORIGINS` when `APP_ENV=development` (see Configuration).
 
 From `api/`, after starting the server:
 
@@ -40,11 +40,14 @@ It never merges shell environment variables, searches parent `.env` files, or
 loads keys into the frontend. Available names:
 
 - `PORT` (default `3001`).
-- `DEV_CORS_ORIGINS` (optional, local development only): comma-separated browser origins
-  allowed in addition to `http://localhost:3000`, for example `http://localhost:3100` for
-  the preview. Each entry must be exactly `http://localhost:<port>`; `*`, `https`, other
-  hosts, or a trailing slash stop the server with "API configuration is invalid." Leave it
-  unset (or blank) for production, where only `http://localhost:3000` is allowed.
+- `APP_ENV` (optional): set to `development` only on a local machine. Any other value, or
+  no value, is treated as production.
+- `DEV_CORS_ORIGINS` (optional): comma-separated browser origins allowed in addition to
+  `http://localhost:3000`, for example `http://localhost:3100` for the preview. It is
+  accepted only with `APP_ENV=development`; with any other `APP_ENV`, or none, a non-blank
+  value stops the server with "API configuration is invalid." Each entry must be exactly
+  `http://localhost:<port>`; `*`, `https`, other hosts, or a trailing slash also stop it.
+  Blank or absent means only `http://localhost:3000` is allowed.
 - `JEV_API_KEY`: absent/blank selects a deterministic probability mock.
 - `ELEVENLABS_API_KEY`: absent/blank selects the explicitly mocked starter-call
   transcript for each uploaded audio file. This demo transcript does **not**

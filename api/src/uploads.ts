@@ -23,7 +23,7 @@ async function readText(file: File): Promise<string> {
   try { return checkedText(new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer())); }
   catch { throw new BadInput('Text uploads must contain valid UTF-8 text within the size limit.'); }
 }
-export async function parseUploads(form: FormData, transcriber: Transcriber, saveAudio?: (file: File) => Promise<string>) {
+export async function parseUploads(form: FormData, transcriber: Transcriber, saveAudio?: (file: File) => Promise<string | null>) {
   const allowed: Record<string, RegExp> = { claims_files: /\.(txt|pdf)$/i, proof_files: /\.(txt|pdf|csv)$/i, claims_audio: /\.(mp3|wav|m4a)$/i };
   const claims: SourceText[] = []; const proofs: SourceText[] = [];
   const names = new Set<string>();
@@ -65,7 +65,8 @@ export async function parseUploads(form: FormData, transcriber: Transcriber, sav
     const result = await transcriber.transcribe(file, file.name);
     // Claim text is the segments joined with newlines: exactly the text the word timings are measured against.
     const text = checkedText(result.segments.length ? result.segments.map(s => s.text).join('\n') : result.text ?? '');
-    const audioFileId = saveAudio ? await saveAudio(file) : undefined;
+    // No ID when the recording could not be kept (unreadable duration): the check still runs, without clip playback.
+    const audioFileId = saveAudio ? await saveAudio(file) ?? undefined : undefined;
     claims.push({ name: file.name, text, segments: result.segments, wordTimings: result.wordTimings,
       audioFileId, mocked: result.mocked });
   }

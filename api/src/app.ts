@@ -57,7 +57,9 @@ export function createApp(deps: { jev?: Jev; transcriber?: Transcriber; threshol
       try { form = await new Request('http://localhost/api/check', { method: 'POST', headers: { 'Content-Type': type }, body: new Uint8Array(body) }).formData(); }
       catch { throw new BadInput('Invalid multipart/form-data.'); }
       const { claims, proofs, ticker } = await parseUploads(form, transcriber, async file => {
-        const id = await audioStore.save(file); savedAudio.push(id); return id;
+        const id = await audioStore.save(file);
+        if (id !== null) savedAudio.push(id);
+        return id;
       });
       const result = await checkClaims(claims, proofs, jev, { ticker, thresholds: deps.thresholds, claude: deps.claude });
       if (!result.findings.length) throw new BadInput('No verifiable claims were found.');

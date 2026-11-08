@@ -11,7 +11,7 @@ import { createJev, type Jev, type Transport } from '../src/jev.js';
 import { compareMoney, containsMoney, decimal, parseMoney } from '../src/money.js';
 import { createTranscriber } from '../src/transcribe.js';
 import { filingFigures, legacyFigures } from '../src/filing.js';
-import { createClaude } from '../src/claude.js';
+import { createClaude, explainFinding } from '../src/claude.js';
 import { bareMoneyAmount, claimsSchema, createClaimExtractor, signedContractsAssertion, splitChunks, type ExtractionNote } from '../src/extract.js';
 import type { CheckResponse, Segment, SourceText } from '../src/types.js';
 
@@ -240,6 +240,94 @@ test('Claude: explanation failures preserve deterministic findings and mark mock
   assert.equal(result.findings[0]!.mocked, true); assert.equal(result.findings[0]!.gap_usd, '10.00');
   assert.equal(result.findings[0]!.explanation, 'The proof amount differs from the claim after normalizing units and periods.');
   assert.equal(requests.length, 3);
+});
+
+test('explanations: six workers preserve document order despite reversed completion and retry/fallback', async () => {
+  const quotes = Array.from({ length: 14 }, (_, index) => `Revenue USD 100.00 (statement ${index})`);
+  const input = source(quotes.join('\n'));
+  const pending: (() => void)[] = [];
+  const attempts = new Map<string, number>();
+  let active = 0; let peak = 0;
+  const completed: string[] = [];
+  const claude = createClaude('test-only-placeholder', async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.max_tokens, 256);
+    const data = JSON.parse(body.messages[0].content);
+    assert.deepEqual(Object.keys(data).sort(), ['claim_quote', 'proof_quote']);
+    assert.equal(data.proof_quote, 'revenue,100.00');
+    active++; peak = Math.max(peak, active);
+    await new Promise<void>(resolve => pending.push(resolve));
+    active--; completed.push(data.claim_quote);
+    const attempt = (attempts.get(data.claim_quote) ?? 0) + 1;
+    attempts.set(data.claim_quote, attempt);
+    // First finding recovers on retry; second exhausts both attempts.
+    const bad = data.claim_quote === quotes[1] || (data.claim_quote === quotes[0] && attempt === 1);
+    return Response.json({ stop_reason: 'end_turn', content: [{ type: 'text', text: bad ? 'bad JSON'
+      : JSON.stringify({ explanation: `Explanation of ${data.claim_quote}` }) }] });
+  }, () => {});
+  const promise = checkClaims([input], [source('revenue,100.00', 'proof.csv')], neverJev,
+    { claude, extractor: async () => ({ claims: quotes.map(quote => ({ ...extractClaims(source(quote))[0]!, quote, source: input })), mocked: false }) });
+  let settled = false;
+  void promise.then(() => { settled = true; });
+  for (let turns = 0; !settled && turns < 100; turns++) {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.ok(active <= 6);
+    // Release later calls first; a serial implementation cannot reach peak six.
+    const batch = pending.splice(0).reverse();
+    batch.forEach(release => release());
+  }
+  assert.ok(settled, 'all workers finish');
+  const result = await promise;
+  assert.equal(peak, 6);
+  assert.notEqual(completed[0], quotes[0]);
+  assert.deepEqual(result.findings.map(f => f.claim), quotes);
+  assert.deepEqual(quotes.map(quote => attempts.get(quote)), [2, 2, ...Array(12).fill(1)]);
+  for (const [index, finding] of result.findings.entries()) {
+    assert.equal(finding.decision, 'YES');
+    assert.equal(finding.mocked, index === 1);
+    assert.equal(finding.explanation, index === 1 ? 'The proof amount matches the claim at its stated precision.' : `Explanation of ${quotes[index]}`);
+  }
+});
+
+test('explanations: fixed reasons and missing evidence use quote templates with zero Claude calls', async () => {
+  for (const [quote, proof, reason] of [
+    ['We expect revenue of USD 100.00.', 'revenue,100.00', /forward-looking/],
+    ['Revenue increased by USD 100.00.', 'revenue,100.00', /change/],
+    ['Revenue EUR 100.00', 'revenue,100.00', /could not be read safely as US dollars/],
+    ['Revenue USD 100.00', 'Unrelated evidence.', /does not address/],
+    ['All material contracts are signed.', 'Unrelated evidence.', /does not address/],
+  ] as const) {
+    const input = source(quote);
+    const { claude, requests } = claudeStub([{ claims: [quote.includes('contracts') ? { type: 'contract', quote }
+      : { type: 'money', quote, amount: '100.00', unit: 'USD', period: '' }] }]);
+    const result = await checkClaims([input], [source(proof)], neverJev, {
+      claude,
+    });
+    assert.equal(requests.length, 1, 'only extraction; zero explanation calls');
+    assert.equal(result.findings.length, 1);
+    const finding = result.findings[0]!;
+    assert.equal(finding.decision, 'NEEDS_REVIEW'); assert.equal(finding.mocked, false);
+    assert.match(finding.explanation, reason); assert.ok(finding.explanation.includes(JSON.stringify(quote)));
+  }
+});
+
+test('explanations: HTTP 429 logs a code and waits before the single retry', async () => {
+  for (const recover of [true, false]) {
+    let calls = 0; const waits: number[] = []; const notes: unknown[] = [];
+    const claude = createClaude('test-only-placeholder', async () => {
+      calls++;
+      if (calls === 1 || !recover) return new Response('private upstream body', { status: 429 });
+      return Response.json({ stop_reason: 'end_turn', content: [{ type: 'text', text: '{"explanation":"The passages agree."}' }] });
+    }, note => notes.push(note), async milliseconds => {
+      assert.equal(calls, 1, 'retry cannot start before backoff'); waits.push(milliseconds);
+    });
+    assert.equal(await explainFinding(claude, 'private claim', 'private proof'), recover ? 'The passages agree.' : null);
+    assert.equal(calls, 2); assert.deepEqual(waits, [500]);
+    assert.deepEqual(notes, Array.from({ length: recover ? 1 : 2 }, (_, index) => ({
+      event: 'claude_attempt_failed', label: 'explain', attempt: index + 1, reason: 'http_status', status: 429,
+    })));
+    assert.ok(!JSON.stringify(notes).includes('private'));
+  }
 });
 
 test('Claude: one invalid response can recover; missing key never calls transport', async () => {

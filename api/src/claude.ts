@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Transport } from './jev.js';
 
 export interface Claude {
@@ -18,7 +19,8 @@ export type ClaudeLog = (note: { event: 'claude_attempt_failed'; label: string; 
 // Longer outputs take longer to generate; a short explanation keeps the old 30 second limit.
 const timeoutFor = (maxTokens: number) => maxTokens > 1024 ? 90000 : 30000;
 
-export function createClaude(apiKey?: string, transport: Transport = fetch, log: ClaudeLog = note => console.warn(JSON.stringify(note))): Claude {
+export function createClaude(apiKey?: string, transport: Transport = fetch, log: ClaudeLog = note => console.warn(JSON.stringify(note)),
+  wait: (milliseconds: number) => Promise<unknown> = delay): Claude {
   return { async json(schema, instructions, data, maxTokens, label = 'claude') {
     if (!apiKey?.trim()) return null;
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -57,6 +59,8 @@ export function createClaude(apiKey?: string, transport: Transport = fetch, log:
       })();
       if ('value' in outcome) return outcome.value as z.infer<typeof schema>;
       log({ event: 'claude_attempt_failed', label, attempt, ...outcome });
+      // One bounded retry, as for other failures; do not retry a rate limit immediately.
+      if (attempt < 2 && outcome.reason === 'http_status' && outcome.status === 429) await wait(500);
     }
     return null;
   } };

@@ -292,7 +292,7 @@ test('explanations: three workers preserve document order despite reversed compl
 
 test('explanations: fixed reasons and missing evidence use quote templates with zero Claude calls', async () => {
   for (const [quote, proof, reason] of [
-    ['We expect revenue of USD 100.00.', 'revenue,100.00', /forward-looking/],
+    ['We expect revenue of USD 100.00.', 'revenue,100.00', /Subjective statement/],
     ['Revenue increased by USD 100.00.', 'revenue,100.00', /change/],
     ['Revenue EUR 100.00', 'revenue,100.00', /could not be read safely as US dollars/],
     ['Revenue USD 100.00', 'Unrelated evidence.', /does not address/],
@@ -985,7 +985,7 @@ test('forward-looking or hedged claims need review with the stated reason and ne
     const result = await callCheck(`${quote}.`, [moneyClaim(quote, /\$[\d.]+ billion/.exec(quote)![0])], pressRelease, jev);
     const finding = result.findings[0]!;
     assert.equal(finding.decision, 'NEEDS_REVIEW', quote); assert.equal(finding.label, 'insufficient');
-    assert.match(finding.explanation, /forward-looking, not verifiable against reported results/);
+    assert.match(finding.explanation, quote.includes('expect') ? /Subjective statement, not verifiable from the proof/ : /forward-looking, not verifiable against reported results/);
     assert.equal(finding.proof_source, null); assert.equal(finding.jev_probability, null);
   }
   const text = await callCheck('We are going to open a new office in Boston.', [{ type: 'text', quote: 'We are going to open a new office in Boston' }],
@@ -1511,4 +1511,51 @@ test('Claude diagnostics: HTTP status, timeout, network and JSON failures are lo
     assert.deepEqual(notes, [1, 2].map(attempt => ({ event: 'claude_attempt_failed', label: 'extract 1/1', attempt, ...expected })), name);
     assert.ok(!/secret|placeholder/.test(JSON.stringify(notes)), name);
   }
+});
+
+test('financial highlights: firmwide rows retain scale, period, per-share and percent units', async () => {
+  const proof = [
+    'Example Bank Third Quarter 2026 Results',
+    'FINANCIAL HIGHLIGHTS',
+    '($ millions, except per share data)    3Q26    2Q26    3Q25',
+    'Net revenue                            50,900  49,100  48,200',
+    'Net income                             15,300  14,100  13,000',
+    'Diluted earnings per share             $5.57   $5.12   $4.84',
+    'Return on tangible common equity      20%     19%     18%',
+    'Provision for credit losses           (700)   200     300',
+  ].join('\n');
+  const figures = filingFigures(source(proof));
+  const first = (key: string) => figures.find(f => f.key === key && f.period === '2026-Q3')!;
+  assert.equal(first('net income').money!.cents, 1530000000000n);
+  assert.equal(first('earning per share diluted').money!.cents, 557n);
+  assert.equal(first('return on tangible common equity').percent!.value, 200000n);
+  assert.equal(first('provision for credit loss').money!.cents, -70000000000n);
+  assert.ok(figures.every(f => f.firmwide));
+  const quotes = ['The Firm delivered net income of $15.3 billion', 'EPS of $5.57', 'an ROTCE of 20%', 'Revenue of $50.9 billion'];
+  const { claude } = claudeStub([{ claims: [moneyClaim(quotes[0]!, '$15.3 billion', ''), moneyClaim(quotes[1]!, '$5.57', ''),
+    { type: 'text', quote: quotes[2] }, moneyClaim(quotes[3]!, '$50.9 billion', '')] }]);
+  const diagnostics: Record<string, number>[] = [];
+  const result = await checkClaims([source('Example Bank Q3 2026 earnings call\n' + quotes.join('. ') + '.', 'call.txt')],
+    [source(proof, 'highlights.pdf')], neverJev, { claude, diagnostics: counts => diagnostics.push(counts) });
+  assert.deepEqual(result.findings.map(f => f.decision), ['YES', 'YES', 'YES', 'YES']);
+  assert.equal(result.findings.find(f => f.claim === quotes[1])!.proof_usd, '5.57');
+  assert.equal(result.findings.find(f => f.claim === quotes[2])!.claimed_usd, null);
+  assert.equal(diagnostics[0]!.money_match, 3);
+  assert.equal(diagnostics[0]!.percent_match, 1);
+});
+
+test('subjective outlook cannot become Jev-only YES, while a named event can', async () => {
+  const quote = 'we can redeploy that capital at very good returns over time';
+  const named = 'The Firm launched Project Atlas on October 7, 2026';
+  const { claude } = claudeStub([{ claims: [{ type: 'text', quote }, { type: 'text', quote: named }] }]);
+  let calls = 0;
+  const jev: Jev = { async ask() { calls++; return { probability: 0.99, mocked: false }; } };
+  const result = await checkClaims([source(`${quote}. ${named}.`)],
+    [source('Project Atlas launched on October 7, 2026.')], jev, { claude, diagnostics: () => {} });
+  const subjective = result.findings.find(f => f.claim === quote)!;
+  assert.equal(subjective.decision, 'NEEDS_REVIEW');
+  assert.match(subjective.explanation, /Subjective statement, not verifiable from the proof/);
+  assert.equal(subjective.jev_probability, null);
+  assert.equal(result.findings.find(f => f.claim === named)!.decision, 'YES');
+  assert.equal(calls, 1);
 });

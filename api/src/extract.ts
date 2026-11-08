@@ -243,7 +243,7 @@ export function extractClaims(source: SourceText): Claim[] {
       const csvPeriod = columns[2] ? normalizePeriod(columns[2]) ?? 'AMBIGUOUS' : linePeriod ?? period;
       let money = null;
       try { if (usd && columns.length <= 3) money = parseMoney(columns[1]!, scale); } catch { /* Keep unsupported claims for review. */ }
-      claims.push({ metric: columns[0]!.toLowerCase() as Metric, source, quote: line, period: csvPeriod, money, offset });
+      claims.push({ metric: columns[0]!.toLowerCase() as Metric, source, quote: line, period: csvPeriod, money, offset, scale });
       continue;
     }
     const expression = new RegExp(String.raw`\b(revenue|cash(?:\s+on\s+hand)?|(?:total\s+)?debt)\b"?\s*(?:for\s+the\s+period\s+)?(?:(?:was|is|of|[:,=])\s*)?"?(${AMOUNT_PATTERN})(?![\d,]|\.\d|\s*(?:EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR|euros?|pounds?|yen|yuan|francs?)\b)`, 'gi');
@@ -253,7 +253,7 @@ export function extractClaims(source: SourceText): Claim[] {
       if (/^\w/.test(after) || /^(?:\s*[-/]?\s*Q[1-4])\b/i.test(after)) continue;
       const metric = /revenue/i.test(match[1]!) ? 'revenue' : /cash/i.test(match[1]!) ? 'cash' : 'debt';
       try {
-        claims.push({ metric, source, quote: match[0], period: linePeriod ?? period, offset: offset + match.index!,
+        claims.push({ metric, source, quote: match[0], period: linePeriod ?? period, offset: offset + match.index!, scale,
           money: usd ? parseMoney(match[2]!, scale) : null });
       } catch { /* Unsupported amounts cannot become verified numeric claims. */ }
     }

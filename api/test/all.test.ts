@@ -10,7 +10,7 @@ import { contractRows, extractClaims, normalizePeriod } from '../src/extract.js'
 import { createJev, type Jev, type Transport } from '../src/jev.js';
 import { compareMoney, containsMoney, decimal, parseMoney } from '../src/money.js';
 import { createTranscriber } from '../src/transcribe.js';
-import { filingFigures } from '../src/filing.js';
+import { filingFigures, legacyFigures } from '../src/filing.js';
 import { createClaude } from '../src/claude.js';
 import { bareMoneyAmount, createClaimExtractor, signedContractsAssertion } from '../src/extract.js';
 import type { CheckResponse, Segment, SourceText } from '../src/types.js';
@@ -1113,3 +1113,63 @@ test('claim currency: a bare amount takes USD from a $ elsewhere in the source; 
   const none = await run(`${bare}.`);
   assert.equal(none.decision, 'NEEDS_REVIEW'); assert.equal(none.claimed_usd, null);
 });
+
+// ---- One validation for every evidence path (inline/legacy matches and table/prose figures) -------------------
+const evidencePaths = [{ name: 'legacy path only', legacy: true, filing: false }, { name: 'figure path only', legacy: false, filing: true },
+  { name: 'both paths', legacy: true, filing: true }] as const;
+async function pathCheck(path: (typeof evidencePaths)[number], claim: string, claimedAmount: string, proof: string, jev: Jev, period = 'Q3 2026') {
+  const { claude } = claudeStub([{ claims: [moneyClaim(claim, claimedAmount, period)] }]);
+  const result = await checkClaims([source(`Example Corp Q3 2026 earnings call\nWe posted ${claim}.`, 'call.txt')], [source(proof, 'proof.txt')], jev,
+    { claude, evidence: { legacy: path.legacy, filing: path.filing } });
+  assertResponse(result);
+  return result.findings[0]!;
+}
+
+test('legacy inline matches are placed in their section, basis and currency like any other figure', () => {
+  const text = 'Example Corp. Q3 2026 results\nManaged revenue of USD 47.9 billion\nRETAIL BANKING (RTL)\nRevenue of USD 18.5 billion';
+  const figures = legacyFigures(source(text, 'proof.txt'));
+  assert.deepEqual(figures.map(f => [f.key, f.basis, f.section, f.firmwide, f.currency, f.period]),
+    [['revenue', 'managed', null, true, 'USD', '2026-Q3'], ['revenue', null, 'RETAIL BANKING (RTL)', false, 'USD', '2026-Q3']]);
+});
+
+for (const path of evidencePaths) {
+  test(`reporting basis (${path.name}): a reported-revenue claim whose only match is a managed-revenue row is NEEDS_REVIEW`, async () => {
+    const { jev, state } = countingJev();
+    const proof = 'Example Corp. Q3 2026 results\nManaged revenue of USD 47.9 billion';
+    const reported = await pathCheck(path, 'reported revenue of $47.9 billion', '$47.9 billion', proof, jev);
+    assert.equal(reported.decision, 'NEEDS_REVIEW'); assert.equal(reported.label, 'insufficient');
+    assert.match(reported.explanation, /different reporting basis/);
+    assert.equal(reported.proof_source, null); assert.equal(reported.proof_usd, null); assert.equal(reported.jev_probability, null);
+    // The same row supports a claim that says managed, so the row itself is read correctly.
+    const managed = await pathCheck(path, 'managed revenue of $47.9 billion', '$47.9 billion', proof, jev);
+    assert.equal(managed.decision, 'YES');
+    // And the reverse: a managed claim never rests on a reported row.
+    const other = await pathCheck(path, 'managed revenue of $47.9 billion', '$47.9 billion', 'Example Corp. Q3 2026 results\nReported revenue of USD 47.9 billion', jev);
+    assert.equal(other.decision, 'NEEDS_REVIEW'); assert.match(other.explanation, /different reporting basis/);
+    assert.equal(state.calls, 0);
+  });
+
+  test(`section (${path.name}): a firmwide revenue claim whose only match is a segment table row is NEEDS_REVIEW`, async () => {
+    const { jev, state } = countingJev();
+    const proof = 'Example Corp. Q3 2026 results\nRETAIL BANKING (RTL)\nRevenue of USD 18.5 billion';
+    const firmwide = await pathCheck(path, 'revenue of $18.5 billion', '$18.5 billion', proof, jev);
+    assert.equal(firmwide.decision, 'NEEDS_REVIEW'); assert.match(firmwide.explanation, /different section/);
+    assert.equal(firmwide.proof_source, null); assert.equal(firmwide.jev_probability, null);
+    // Not a NO either, whatever the amount: a segment figure says nothing about the firm.
+    const different = await pathCheck(path, 'revenue of $20.0 billion', '$20.0 billion', proof, jev);
+    assert.equal(different.decision, 'NEEDS_REVIEW'); assert.equal(different.gap_usd, null);
+    // A claim that names the segment uses the segment's own figure.
+    const named = await pathCheck(path, 'RTL revenue of $18.5 billion', '$18.5 billion', proof, jev);
+    assert.equal(named.decision, 'YES');
+    assert.equal(state.calls, 0);
+  });
+
+  test(`currency per section (${path.name}): a second currency anywhere in the section keeps the amount from being compared`, async () => {
+    const { jev, state } = countingJev();
+    const mixed = await pathCheck(path, 'revenue of $47.9 billion', '$47.9 billion', 'Example Corp. Q3 2026 results\nRevenue of USD 47.9 billion\nFX cost of €2 million', jev);
+    assert.equal(mixed.decision, 'NEEDS_REVIEW'); assert.match(mixed.explanation, /not clearly in US dollars/);
+    const clean = await pathCheck(path, 'revenue of $47.9 billion', '$47.9 billion', 'Example Corp. Q3 2026 results\nRevenue of USD 47.9 billion\nFX cost of $2 million', jev);
+    assert.equal(clean.decision, 'YES');
+    assert.equal(state.calls, 0);
+  });
+}

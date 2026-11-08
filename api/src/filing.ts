@@ -2,8 +2,8 @@
 // Everything here is deterministic code on integer cents; no model is involved.
 import { AMOUNT_PATTERN, containsMoney, currencyOf, OTHER_CURRENCY, parseMoney, roundTo, unitFromText, unparsedScaleAfter, type Currency } from './money.js';
 export { currencyOf, type Currency } from './money.js';
-import { periodsInOrder, stripPeriods } from './extract.js';
-import type { Money, SourceText } from './types.js';
+import { extractClaims, isMetric, periodsInOrder, stripPeriods } from './extract.js';
+import type { Claim, Money, SourceText } from './types.js';
 
 // A percentage in 1e-4 percent units (15.7% is 157000) with the precision it was written at.
 export interface Percent { value: bigint; quantum: bigint }
@@ -137,31 +137,51 @@ function valueFigure(token: string, label: string, scale: bigint): (Pick<Figure,
 }
 // A section runs from an all-caps heading ("CONSUMER & COMMUNITY BANKING (CCB)") to the next one. Its currency evidence
 // is collected over the whole section, so a "$ millions" heading, a "$" amount anywhere in it and a stray "EUR" all count.
-interface Section { name: string | null; firmwide: boolean; usd: boolean; other: boolean }
+interface Section { name: string | null; firmwide: boolean; usd: boolean; other: boolean; from: number }
 interface Draft extends Figure { sec: Section; explicit: Currency }
+interface DocLine { text: string; start: number }
 const SECTION_HEADING = /^[A-Z][A-Z &,.'/-]{5,}(?:\s*\([A-Z0-9]{2,8}\))?$/;
+const isHeading = (line: string): boolean => SECTION_HEADING.test(line) && (line.match(/[A-Z]/g) ?? []).length >= 6;
 function markers(line: string): { usd: boolean; other: boolean } {
   const other = OTHER_CURRENCY.test(line);
   return { other, usd: currencyOf(line.replace(/\b(?:C|A|HK|NZ|S)\$/gi, '')) === 'USD' };
 }
-export function filingFigures(source: SourceText): Figure[] {
-  const drafts: Draft[] = [];
-  const lines = source.text.split(/\r?\n/).map(raw => raw.trim()).filter(Boolean);
+// The sections of a document, shared by every evidence path so that none can see a section differently from another.
+function sectionIndex(source: SourceText): { lines: DocLine[]; at(offset: number): Section } {
+  const lines: DocLine[] = [...source.text.matchAll(/[^\r\n]+/g)].map(match => {
+    const text = match[0].trim();
+    return { text, start: match.index! + match[0].indexOf(text) };
+  }).filter(line => line.text);
   // Words of the document's opening lines: a section named after the company itself is firmwide, not a segment.
-  const firstHeading = lines.findIndex(line => SECTION_HEADING.test(line) && (line.match(/[A-Z]/g) ?? []).length >= 6);
-  const titleWords = new Set(lines.slice(0, Math.min(12, firstHeading < 0 ? 12 : firstHeading)).flatMap(line => line.toLowerCase().match(/[a-z]{5,}/g) ?? []));
-  let section: Section = { name: null, firmwide: true, usd: false, other: false };
-  const sections = [section];
-  let scale = 1n; let period: string | null = null; let columns: (string | null)[] | null = null;
+  const firstHeading = lines.findIndex(line => isHeading(line.text));
+  const titleWords = new Set(lines.slice(0, Math.min(12, firstHeading < 0 ? 12 : firstHeading))
+    .flatMap(line => line.text.toLowerCase().match(/[a-z]{5,}/g) ?? []));
+  const sections: Section[] = [{ name: null, firmwide: true, usd: false, other: false, from: 0 }];
   for (const line of lines) {
-    if (SECTION_HEADING.test(line) && (line.match(/[A-Z]/g) ?? []).length >= 6) {
-      const words = line.toLowerCase().match(/[a-z]{5,}/g) ?? [];
-      section = { name: line, firmwide: words.some(word => titleWords.has(word)) || /\b(?:firmwide|consolidated|group)\b/i.test(line), usd: false, other: false };
-      sections.push(section);
+    if (isHeading(line.text)) {
+      const words = line.text.toLowerCase().match(/[a-z]{5,}/g) ?? [];
+      // A heading on the document's first line is its title, not a segment.
+      sections.push({ name: line.text, firmwide: line === lines[0] || words.some(word => titleWords.has(word)) || /\b(?:firmwide|consolidated|group)\b/i.test(line.text),
+        usd: false, other: false, from: line.start });
       continue;
     }
-    const seen = markers(line);
-    section.usd ||= seen.usd; section.other ||= seen.other;
+    const current = sections[sections.length - 1]!;
+    const seen = markers(line.text);
+    current.usd ||= seen.usd; current.other ||= seen.other;
+  }
+  return { lines, at: offset => [...sections].reverse().find(section => section.from <= offset) ?? sections[0]! };
+}
+// Currency is decided per section, not per number. USD needs a $/US$/USD marker in the section and no other currency
+// marker anywhere in it; any other marker, a mix, or no evidence at all is never USD.
+const sectionCurrency = (explicit: Currency, sec: Section): Currency =>
+  explicit === 'other' || sec.other ? 'other' : explicit === 'USD' || sec.usd ? 'USD' : 'unknown';
+export function filingFigures(source: SourceText): Figure[] {
+  const drafts: Draft[] = [];
+  const index = sectionIndex(source);
+  let scale = 1n; let period: string | null = null; let columns: (string | null)[] | null = null;
+  for (const { text: line, start } of index.lines) {
+    if (isHeading(line)) continue;
+    const section = index.at(start);
     const lineScale = unitFromText(line);
     if (lineScale) scale = lineScale;
     const periods = periodsInOrder(line);
@@ -169,9 +189,9 @@ export function filingFigures(source: SourceText): Figure[] {
     if (row) {
       const key = metricKey(row.label);
       if (!key) continue;
-      row.values.forEach((token, index) => {
+      row.values.forEach((token, position) => {
         if (token === null) return;
-        const column = columns && row.values.length >= columns.length ? columns[index] ?? null
+        const column = columns && row.values.length >= columns.length ? columns[position] ?? null
           : row.values.length === 1 ? period : null;
         if (!column) return;
         const value = valueFigure(token, row.label, scale);
@@ -189,11 +209,38 @@ export function filingFigures(source: SourceText): Figure[] {
     }
     proseFigures(line, period, section, source, drafts);
   }
-  void sections;
-  // Currency is decided per section, not per number. USD needs a $/US$/USD marker in the section and no other currency
-  // marker anywhere in it; any other marker, a mix, or no evidence at all is never USD.
-  return drafts.map(({ sec, explicit, ...figure }) => ({ ...figure,
-    currency: explicit === 'other' || sec.other ? 'other' : explicit === 'USD' || sec.usd ? 'USD' : 'unknown' }));
+  return drafts.map(({ sec, explicit, ...figure }) => ({ ...figure, currency: sectionCurrency(explicit, sec) }));
+}
+// The older inline matcher ("Revenue USD 100", "revenue,100" rows) as figures, placed in its section like every other
+// figure, so that it is validated by exactly the same rules (basis, section, currency, scale) as a table row.
+export function legacyFigures(source: SourceText, found: Claim[] = extractClaims(source)): Figure[] {
+  const index = sectionIndex(source);
+  const out: Figure[] = [];
+  for (const claim of found) {
+    if (!isMetric(claim.metric) || !claim.money || claim.offset === undefined) continue;
+    const section = index.at(claim.offset);
+    const explicit = currencyOf(claim.quote);
+    const resolved = sectionCurrency(explicit, section);
+    // Plain records (the starter CSV, "Revenue USD 100") keep their long-standing meaning: an unscaled amount with no
+    // marker anywhere is USD. A scaled amount with no marker ("Revenue was 100 million") could be any currency.
+    const currency: Currency = resolved === 'unknown' && !hasScaledAmount(claim.quote) ? 'USD' : resolved;
+    const lineStart = claim.source.text.lastIndexOf('\n', claim.offset - 1) + 1;
+    const before = claim.source.text.slice(lineStart, claim.offset);
+    out.push({ key: claim.metric, money: claim.money, percent: null, period: claim.period, quote: claim.quote, source,
+      currency, section: section.name, firmwide: section.firmwide,
+      unitUnclear: claim.scale !== undefined && claim.scale !== 1n && OTHER_UNIT.test(before) && !PER_SHARE.test(before),
+      // A basis word right before the match ("Reported revenue of $50.2 billion") or inside it labels the inline figure.
+      basis: basisOf(claim.source.text.slice(Math.max(lineStart, claim.offset - 14), claim.offset + claim.quote.length)) });
+  }
+  return out;
+}
+// Both evidence paths, merged. A figure the two paths both found is kept once, in its legacy form.
+export function proofFigures(source: SourceText, paths: { legacy?: boolean; filing?: boolean } = {}): Figure[] {
+  const legacy = paths.legacy === false ? [] : legacyFigures(source);
+  const same = (a: Figure, b: Figure) => a.quote === b.quote && a.key === b.key && a.period === b.period
+    && a.money?.cents === b.money?.cents && a.source === b.source;
+  const filing = paths.filing === false ? [] : filingFigures(source).filter(figure => !legacy.some(old => same(old, figure)));
+  return [...legacy, ...filing];
 }
 // A claim's metric name without the segment it names: "RTL net income" is "net income" in the RTL section.
 export function withoutSections(key: string, all: Figure[]): string {
@@ -245,7 +292,7 @@ function proseFigures(line: string, sectionPeriod: string | null, sec: Section, 
     const period = own.length === 1 ? own[0]! : linePeriods.length === 1 ? linePeriods[0]! : linePeriods.length === 0 ? sectionPeriod
       : before[before.length - 1] ?? null;
     if (!period || period === 'AMBIGUOUS') return;
-    out.push({ key, money: hit.money, percent: hit.percent, period, quote: line, source, currency: 'unknown', explicit, unitUnclear: false, basis: basisOf(label ?? ''),
+    out.push({ key, money: hit.money, percent: hit.percent, period, quote: line, source, currency: 'unknown', explicit, unitUnclear: false, basis: basisOf(between.slice(-24)),
       section: sec.name, firmwide: sec.firmwide, sec });
   });
 }

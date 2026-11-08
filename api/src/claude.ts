@@ -4,7 +4,8 @@ import type { Transport } from './jev.js';
 
 export interface Claude {
   // `label` names the call in diagnostics ("extract 2/5"); it must never contain document text.
-  json<Output>(schema: z.ZodType<Output>, instructions: string, data: unknown, maxTokens: number, label?: string): Promise<Output | null>;
+  json<Output>(schema: z.ZodType<Output>, instructions: string, data: unknown, maxTokens: number, label?: string,
+    onTruncated?: () => void): Promise<Output | null>;
 }
 // Why one attempt failed. Only codes, statuses and field paths: never document text, model output or keys.
 export type ClaudeFailure =
@@ -21,7 +22,7 @@ const timeoutFor = (maxTokens: number) => maxTokens > 1024 ? 90000 : 30000;
 
 export function createClaude(apiKey?: string, transport: Transport = fetch, log: ClaudeLog = note => console.warn(JSON.stringify(note)),
   wait: (milliseconds: number) => Promise<unknown> = delay): Claude {
-  return { async json(schema, instructions, data, maxTokens, label = 'claude') {
+  return { async json(schema, instructions, data, maxTokens, label = 'claude', onTruncated) {
     if (!apiKey?.trim()) return null;
     for (let attempt = 1; attempt <= 2; attempt++) {
       const outcome = await (async (): Promise<ClaudeFailure | { value: unknown }> => {
@@ -59,6 +60,9 @@ export function createClaude(apiKey?: string, transport: Transport = fetch, log:
       })();
       if ('value' in outcome) return outcome.value as z.infer<typeof schema>;
       log({ event: 'claude_attempt_failed', label, attempt, ...outcome });
+      if (outcome.reason === 'stop_reason' && outcome.stop_reason === 'max_tokens' && onTruncated) {
+        onTruncated(); return null;
+      }
       // One bounded retry, as for other failures; do not retry a rate limit immediately.
       if (attempt < 2 && outcome.reason === 'http_status' && outcome.status === 429) await wait(500);
     }

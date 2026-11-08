@@ -5,11 +5,13 @@ import type { Claude } from './claude.js';
 
 const quoteSchema = z.string().min(1).max(12000).regex(/\S/);
 const fieldSchema = z.string().max(128);
-export const claimsSchema = z.strictObject({ claims: z.array(z.discriminatedUnion('type', [
-  z.strictObject({ type: z.literal('money'), quote: quoteSchema, amount: fieldSchema.min(1), unit: fieldSchema, period: fieldSchema }),
-  z.strictObject({ type: z.literal('text'), quote: quoteSchema }),
-  z.strictObject({ type: z.literal('contract'), quote: quoteSchema }),
-])).max(300) });
+export const claimSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('money'), quote: quoteSchema, amount: fieldSchema.min(1), unit: fieldSchema, period: fieldSchema }),
+  z.object({ type: z.literal('text'), quote: quoteSchema }),
+  z.object({ type: z.literal('contract'), quote: quoteSchema }),
+]);
+// Validate the envelope separately so one malformed claim cannot discard its neighbours.
+export const claimsSchema = z.object({ claims: z.array(z.unknown()).max(300) });
 export interface Extraction { claims: Claim[]; mocked: boolean }
 export type ClaimExtractor = (source: SourceText) => Promise<Extraction>;
 // Long documents are read in chunks: one call per ~6,000 characters with a modest output limit, so no single answer
@@ -17,12 +19,15 @@ export type ClaimExtractor = (source: SourceText) => Promise<Extraction>;
 export const CHUNK_CHARS = 6000;
 export const CHUNK_MAX_TOKENS = 4096;
 export const MAX_CLAIMS = 300;
-const CHUNK_CONCURRENCY = 6;
+const CHUNK_CONCURRENCY = 3;
 // Counts only: never document text. One note per extracted source.
 export interface ExtractionNote {
   dropped_claims: number; // quote not found word for word in the source
   chunks: number; failed_chunks: number; // a failed chunk used the regex fallback after Claude's retry
   claims_returned: number; duplicates: number; fallback_claims: number; kept_claims: number; capped: number;
+  invalid_claims?: number;
+  invalid_fields?: string[];
+  split_chunks?: number;
 }
 export interface Chunk { start: number; end: number; text: string }
 // Split on the strongest boundary in the second half of each window: a blank line, then a speaker turn
@@ -61,11 +66,33 @@ const EXTRACTION_INSTRUCTIONS =
       'Extract every factual claim from this pitch, memo, or transcript. Make every claim atomic: one metric and one number per claim. Split a compound sentence into separate claims, for example "net income of $15.3 billion, EPS of $5.57, and an ROTCE of 20%" becomes three claims: "net income of $15.3 billion", "EPS of $5.57" and "ROTCE of 20%". Keep the metric name next to its number in each quote and put a change ("up 8%", "year-on-year") in its own claim. Never combine two numbers in one quote. Copy each quote exactly, including whitespace and punctuation, as a contiguous source substring. Use type money, text, or contract. For money, copy the stated amount, unit/currency and period as text, never normalize or compute them. Use empty strings for unstated unit or period. Include sufficient context in the quote to identify the metric, amount, currency and period. Never invent a source or citation. Do not return commentary.';
 export function createClaimExtractor(claude: Claude, log: (note: ExtractionNote) => void = note => console.info(JSON.stringify(note))): ClaimExtractor {
   return async source => {
-    const chunks = splitChunks(source.text);
-    const results = await mapLimit(chunks, CHUNK_CONCURRENCY, (chunk, index) =>
-      claude.json(claimsSchema, EXTRACTION_INSTRUCTIONS, { text: chunk.text }, CHUNK_MAX_TOKENS, `extract ${index + 1}/${chunks.length}`));
+    const initial = splitChunks(source.text);
+    let splits = 0;
+    type Result = { chunk: Chunk; result: z.infer<typeof claimsSchema> | null };
+    const read = async (chunk: Chunk, label: string, depth = 0): Promise<Result[]> => {
+      let truncated = false;
+      const result = await claude.json(claimsSchema,
+        `${EXTRACTION_INSTRUCTIONS} Each claim must match: ${JSON.stringify(z.toJSONSchema(claimSchema))}`,
+        { text: chunk.text }, CHUNK_MAX_TOKENS, label, () => { truncated = true; });
+      // Bound recursive recovery to two splits per path. Children run sequentially inside
+      // the parent's worker slot, keeping the global transport limit at three.
+      if (truncated && depth < 2 && chunk.text.length > 1) {
+        splits++;
+        const half = Math.ceil(chunk.text.length / 2);
+        const children = [{ start: chunk.start, end: chunk.start + half, text: chunk.text.slice(0, half) },
+          { start: chunk.start + half, end: chunk.end, text: chunk.text.slice(half) }];
+        const leaves: Result[] = [];
+        for (const [index, child] of children.entries()) leaves.push(...await read(child, `${label}.${index + 1}`, depth + 1));
+        return leaves;
+      }
+      return [{ chunk, result }];
+    };
+    const leaves = (await mapLimit(initial, CHUNK_CONCURRENCY, (chunk, index) => read(chunk, `extract ${index + 1}/${initial.length}`))).flat();
+    const chunks = leaves.map(leaf => leaf.chunk);
+    const results = leaves.map(leaf => leaf.result);
     const note: ExtractionNote = { dropped_claims: 0, chunks: chunks.length, failed_chunks: results.filter(result => !result).length,
       claims_returned: results.reduce((sum, result) => sum + (result?.claims.length ?? 0), 0), duplicates: 0, fallback_claims: 0, kept_claims: 0, capped: 0 };
+    if (splits) note.split_chunks = splits;
     // Every chunk failed (or no key): the whole source uses the regex extractor, exactly as before chunking.
     if (results.every(result => !result)) {
       const claims = extractClaims(source);
@@ -91,7 +118,17 @@ export function createClaimExtractor(claude: Claude, log: (note: ExtractionNote)
       }
       continue;
     }
-    const queue: (typeof result.claims)[number][] = [...result.claims];
+    const queue: z.infer<typeof claimSchema>[] = [];
+    for (const [index, raw] of result.claims.entries()) {
+      const checked = claimSchema.safeParse(raw);
+      if (checked.success) queue.push(checked.data); // z.object strips every unknown key.
+      else {
+        note.invalid_claims = (note.invalid_claims ?? 0) + 1;
+        note.invalid_fields ??= [];
+        // Paths come only from the allowlisted schema fields; never log input keys or values.
+        for (const issue of checked.error.issues) note.invalid_fields.push(`chunks.${chunkIndex}.claims.${index}${issue.path.length ? `.${issue.path.join('.')}` : ''}`);
+      }
+    }
     for (let next = 0; next < queue.length; next++) {
       const labelled = queue[next]!;
       // Code, not Claude's label, decides whether a quote is money. Money never reaches Jev as text.

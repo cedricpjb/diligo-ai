@@ -1544,6 +1544,26 @@ test('financial highlights: firmwide rows retain scale, period, per-share and pe
   assert.equal(diagnostics[0]!.percent_match, 1);
 });
 
+test('financial highlights inside a segment do not support a firmwide claim', async () => {
+  const proof = [
+    'Example Bank Third Quarter 2026 Results',
+    'RETAIL BANKING (RTL)',
+    'FINANCIAL HIGHLIGHTS',
+    '($ millions)    3Q26    2Q26    3Q25',
+    'Net revenue     12,300  11,900  11,500',
+  ].join('\n');
+  const quote = 'Revenue of $12.3 billion';
+  const { claude } = claudeStub([{ claims: [moneyClaim(quote, '$12.3 billion', '')] }]);
+  const result = await checkClaims([source(`Example Bank Q3 2026 earnings call\n${quote}.`)],
+    [source(proof)], neverJev, { claude, diagnostics: () => {} });
+  assert.equal(result.findings[0]!.decision, 'NEEDS_REVIEW');
+  assert.equal(result.findings[0]!.proof_usd, null);
+  assert.match(result.findings[0]!.explanation, /different section/);
+  const segmentFigures = filingFigures(source(proof));
+  assert.ok(segmentFigures.length > 0);
+  assert.ok(segmentFigures.every(figure => !figure.firmwide && figure.section === 'RETAIL BANKING (RTL)'));
+});
+
 test('subjective outlook cannot become Jev-only YES, while a named event can', async () => {
   const quote = 'we can redeploy that capital at very good returns over time';
   const named = 'The Firm launched Project Atlas on October 7, 2026';

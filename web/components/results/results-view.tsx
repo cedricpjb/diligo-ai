@@ -114,20 +114,20 @@ function Results({
         <div className="flex flex-col gap-3" aria-label="Notices">
           {investigation.sample && (
             <Notice>
-              <strong className="font-medium text-foreground">Sample data.</strong> No API URL is
+              <strong className="font-semibold text-foreground">Sample data.</strong> No API URL is
               set, so these are the starter case’s findings, not an analysis of the files you added.
             </Notice>
           )}
           {!persisted && (
             <Notice>
-              <strong className="font-medium text-foreground">This result is not saved.</strong> The
+              <strong className="font-semibold text-foreground">This result is not saved.</strong> The
               browser would not store it, so it stays only until you reload or close this tab. Export
               it to Excel if you need to keep it.
             </Notice>
           )}
           {summary.mockedCount > 0 && (
             <Notice>
-              <strong className="font-medium text-foreground">
+              <strong className="font-semibold text-foreground">
                 {summary.mockedCount} {summary.mockedCount === 1 ? "finding uses" : "findings use"}{" "}
                 mock results
               </strong>{" "}
@@ -137,7 +137,7 @@ function Results({
           )}
           {exportState.status === "done" && (
             <Notice role="status" onDismiss={() => setExportState({ status: "idle" })}>
-              <strong className="font-medium text-foreground">Excel file ready.</strong> Your
+              <strong className="font-semibold text-foreground">Excel file ready.</strong> Your
               browser is saving{" "}
               <span className="font-mono text-xs break-all text-foreground">
                 {exportState.fileName}
@@ -152,7 +152,7 @@ function Results({
               tone="error"
               onDismiss={() => setExportState({ status: "idle" })}
             >
-              <strong className="font-medium text-foreground">
+              <strong className="font-semibold text-foreground">
                 The Excel file could not be made.
               </strong>{" "}
               Try Export to Excel again. If it keeps failing, reload this page.
@@ -230,7 +230,7 @@ function EmptyResults() {
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pt-12 pb-16 sm:px-8 sm:pt-20">
       <div className="rounded-2xl border border-border bg-card p-8 shadow-card">
-        <h1 className="text-xl font-semibold tracking-tight">No results yet</h1>
+        <h1 className="text-[28px] leading-[1.15] font-semibold tracking-tight sm:text-4xl">No results yet</h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
           Results appear here after you analyze a deal. They stay in this browser tab only.
         </p>
@@ -251,9 +251,9 @@ function ResultsSkeleton() {
       className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 pt-8 pb-16 sm:px-8 sm:pt-10"
       aria-busy="true"
     >
-      <span className="sr-only" role="status">
-        Loading results…
-      </span>
+      <p role="status" className="text-sm text-muted-foreground">
+        Loading the results…
+      </p>
       <Skeleton className="h-16 w-2/3" />
       <div className="grid grid-cols-3 gap-3 xl:grid-cols-4">
         {[0, 1, 2, 3].map((i) => (

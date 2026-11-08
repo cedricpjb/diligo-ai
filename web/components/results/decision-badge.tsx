@@ -38,7 +38,7 @@ export function MockedBadge({ className }: { className?: string }) {
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center rounded-full border border-dashed border-white/25 px-2.5 text-xs font-medium tracking-wide whitespace-nowrap text-muted-foreground",
+        "inline-flex h-6 items-center rounded-full border border-dashed border-white/25 px-2.5 text-xs font-semibold tracking-wide whitespace-nowrap text-muted-foreground",
         className
       )}
     >

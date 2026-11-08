@@ -11,7 +11,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node scripts/test-known-text.mjs && node scripts/test-recording.mjs && node scripts/test-recording-session.mjs && node scripts/test-preview-url.mjs && node scripts/test-jev-sort.mjs",
+    "test": "node scripts/test-known-text.mjs && node scripts/test-recording.mjs && node scripts/test-recording-session.mjs && node scripts/test-preview-url.mjs && node scripts/test-jev-sort.mjs && node scripts/test-ui-text.mjs",
     "typecheck": "node scripts/sync-mock.mjs && tsc --noEmit"
   },
   "dependencies": {

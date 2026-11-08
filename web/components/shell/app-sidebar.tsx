@@ -14,7 +14,6 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
@@ -37,7 +36,7 @@ export function AppSidebar() {
         >
           <BrandMark />
           <span className="flex min-w-0 flex-col leading-tight group-data-[collapsible=icon]:hidden">
-            <span className="text-[15px] font-semibold tracking-tight">
+            <span className="text-sm font-semibold tracking-tight">
               Diligo<span className="text-muted-foreground">.ai</span>
             </span>
             <span className="truncate text-xs text-muted-foreground">
@@ -53,26 +52,8 @@ export function AppSidebar() {
           <SidebarGroupContent>
             <SidebarMenu className="gap-1">
               {NAV_ITEMS.map((item) => {
-                const active = !item.soon && pathname.startsWith(item.href)
+                const active = pathname.startsWith(item.href)
                 const Icon = item.icon
-
-                if (item.soon) {
-                  return (
-                    <SidebarMenuItem key={item.href}>
-                      <SidebarMenuButton
-                        aria-disabled="true"
-                        tooltip={`${item.title} (coming soon)`}
-                        className="h-11 cursor-default md:h-10 text-muted-foreground hover:bg-transparent hover:text-muted-foreground aria-disabled:pointer-events-auto aria-disabled:opacity-60"
-                      >
-                        <Icon aria-hidden />
-                        <span>{item.title}</span>
-                      </SidebarMenuButton>
-                      <SidebarMenuBadge className="top-3! rounded-full md:top-2.5! border border-border px-1.5 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
-                        Soon
-                      </SidebarMenuBadge>
-                    </SidebarMenuItem>
-                  )
-                }
 
                 return (
                   <SidebarMenuItem key={item.href}>
@@ -106,7 +87,7 @@ export function AppSidebar() {
 
       <SidebarFooter className="p-3 group-data-[collapsible=icon]:hidden">
         <div className="rounded-lg border border-border px-3 py-2.5 text-xs leading-relaxed">
-          <p className="font-medium text-foreground">
+          <p className="font-semibold text-foreground">
             {isSampleMode ? "Sample data" : "Live API"}
           </p>
           <p className="text-muted-foreground">

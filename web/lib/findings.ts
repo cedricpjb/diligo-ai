@@ -15,6 +15,9 @@ export const PRIORITY_LABEL: Record<Priority, string> = {
 
 const PRIORITY_RANK: Record<Priority, number> = { high: 0, medium: 1, low: 2 }
 
+/** The order the Findings list uses, shown above it. Keep in step with sortFindings. */
+export const FINDINGS_SORT_NOTE = "Sorted by decision, then priority or Jev score."
+
 const DECISION_RANK: Record<Decision, number> = { NO: 0, YES: 1, NEEDS_REVIEW: 2 }
 
 /**

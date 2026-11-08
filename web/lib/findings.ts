@@ -1,5 +1,5 @@
-import { toCents } from "./money"
-import type { Decision, Finding, Priority, Source } from "./types"
+import { toCents } from "./money.ts"
+import type { Decision, Finding, Priority, Source } from "./types.ts"
 
 export const DECISION_LABEL: Record<Decision, string> = {
   YES: "YES",
@@ -15,16 +15,31 @@ export const PRIORITY_LABEL: Record<Priority, string> = {
 
 const PRIORITY_RANK: Record<Priority, number> = { high: 0, medium: 1, low: 2 }
 
-/** Priority first (high to low), then the larger dollar gap, then the order the API sent. */
+const DECISION_RANK: Record<Decision, number> = { NO: 0, YES: 1, NEEDS_REVIEW: 2 }
+
+/**
+ * Decision group first (NO, YES, NEEDS REVIEW, the order the filters use). Inside NO and YES:
+ * priority (high to low), then the larger dollar gap. Inside NEEDS REVIEW: Jev probability,
+ * highest first, with no score last, since those still wait on a human read of the wording.
+ * Each comparison applies one rule to one group, so the order does not depend on input order.
+ */
 export function sortFindings(findings: Finding[]): Finding[] {
   return findings
     .map((finding, index) => ({
       finding,
       index,
-      rank: PRIORITY_RANK[finding.priority] ?? 3,
+      group: DECISION_RANK[finding.decision] ?? 3,
+      priority: PRIORITY_RANK[finding.priority] ?? 3,
       gap: Math.abs(toCents(finding.gap_usd) ?? 0),
+      jev: finding.jev_probability ?? -1,
     }))
-    .sort((a, b) => a.rank - b.rank || b.gap - a.gap || a.index - b.index)
+    .sort((a, b) => {
+      if (a.group !== b.group) return a.group - b.group
+      if (a.group === DECISION_RANK.NEEDS_REVIEW) {
+        return b.jev - a.jev || a.index - b.index
+      }
+      return a.priority - b.priority || b.gap - a.gap || a.index - b.index
+    })
     .map((entry) => entry.finding)
 }
 
@@ -97,7 +112,7 @@ export function hasNoProof(finding: Finding): boolean {
 /** At this many findings the list gets filter chips and the review count leads. */
 export const MANY_FINDINGS = 30
 
-export { knownText } from "./known-text"
+export { knownText } from "./known-text.ts"
 
 export interface SourceUsage {
   source: Source

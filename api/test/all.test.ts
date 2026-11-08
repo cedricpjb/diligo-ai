@@ -14,6 +14,7 @@ import { filingFigures, legacyFigures } from '../src/filing.js';
 import { createClaude, explainFinding } from '../src/claude.js';
 import { bareMoneyAmount, claimSchema, claimsSchema, createClaimExtractor, signedContractsAssertion, splitChunks, type ExtractionNote } from '../src/extract.js';
 import type { CheckResponse, Segment, SourceText } from '../src/types.js';
+import { checkableClaim, completeAssertion } from '../src/quality.js';
 
 // Block real external calls even on a developer machine with installed keys.
 const nativeFetch = globalThis.fetch;
@@ -118,7 +119,8 @@ test('Claude: generic text uses code-selected proof and Jev; missing evidence ne
   const result = await checkClaims([source(quote)], [source(proof, 'proof.txt')], { async ask(state, question) {
     assert.equal(state, proof); assert.ok(question.includes(quote)); return { probability: 0.1, mocked: false };
   } }, { claude });
-  assert.equal(result.findings[0]!.decision, 'NO'); assert.equal(result.findings[0]!.mocked, false);
+  assert.equal(result.findings[0]!.decision, 'NEEDS_REVIEW'); assert.equal(result.findings[0]!.mocked, false);
+  assert.match(result.findings[0]!.explanation, /Jev found no support in the proof/);
   assert.equal(result.findings[0]!.proof_source!.quote, proof);
   const missing = claudeStub([{ claims: [{ type: 'text', quote }] }, { explanation: 'Matching evidence is unavailable.' }]);
   const review = await checkClaims([source(quote)], [source('Unrelated evidence.', 'proof.txt')], neverJev, { claude: missing.claude });
@@ -586,7 +588,7 @@ test('priority: NO first and exact percentage gaps with 2x revenue/cash weight',
   assert.equal((await check('Debt USD 1000000.00\nRevenue USD 1000000.00', 'debt,999999.99\nrevenue,999999.98')).findings[0]!.id, 'f-revenue');
 });
 test('thresholds: inclusive boundaries live in checking code and are configurable', () => {
-  for (const [p, decision] of [[0.2, 'NO'], [0.20001, 'NEEDS_REVIEW'], [0.79999, 'NEEDS_REVIEW'], [0.8, 'YES']] as const) assert.equal(probabilityDecision(p), decision);
+  for (const [p, decision] of [[0.2, 'NEEDS_REVIEW'], [0.20001, 'NEEDS_REVIEW'], [0.79999, 'NEEDS_REVIEW'], [0.8, 'YES']] as const) assert.equal(probabilityDecision(p), decision);
   assert.equal(probabilityDecision(0.8, { yes: 0.9, no: 0.1 }), 'NEEDS_REVIEW');
   for (const value of [-1, 2, NaN, Infinity]) assert.throws(() => probabilityDecision(value));
   assert.throws(() => probabilityDecision(0.5, { yes: 0.2, no: 0.8 }));
@@ -951,7 +953,7 @@ test('tables: "$ in millions" scale, period columns and parenthesised negatives 
   assert.equal(find('net income', '2025-Q3').find(f => f.quote.startsWith('Net income'))!.money!.cents, 1341900000000n);
   assert.equal(find('revenue', '2026-Q3')[0]!.money!.cents, 4600000000000n);
   assert.equal(find('provision for credit loss', '2026-Q3')[0]!.money!.cents, -123400000000n);
-  assert.equal(find('diluted earning per share', '2026-Q3')[0]!.money!.cents, 507n); // per-share rows ignore the millions header
+  assert.equal(find('earning per share diluted', '2026-Q3')[0]!.money!.cents, 507n); // per-share rows ignore the millions header
   assert.equal(find('cet1 capital ratio', '2026-Q3')[0]!.percent!.value, 157000n);
   assert.equal(figures.some(f => f.period === null), false);
 });
@@ -1027,9 +1029,92 @@ test('text claims reach Jev only when code found a relevant passage', async () =
   const proof = 'The Boston office remains closed pending permits.\nUnrelated line about weather.';
   const { jev, state } = countingJev();
   const hit = await callCheck('The Boston office opened in May.', [{ type: 'text', quote: 'The Boston office opened in May.' }], proof, jev);
-  assert.equal(state.calls, 1); assert.equal(hit.findings[0]!.decision, 'NO');
+  assert.equal(state.calls, 1); assert.equal(hit.findings[0]!.decision, 'NEEDS_REVIEW');
   const weak = await callCheck('The office was great.', [{ type: 'text', quote: 'The office was great.' }], proof, jev);
   assert.equal(state.calls, 1); assert.equal(weak.findings[0]!.decision, 'NEEDS_REVIEW');
+});
+
+test('claim quality: names, headings, document titles and topic fragments never reach Jev', async () => {
+  const fragments = ['Alex Rowan Chief Financial Officer, Example Bank', 'the impact of higher rates on trading',
+    'Annual Report on Form 10-K for the year ended December 31, 2027', 'Q3 2028 Financial Results',
+    'Prepared Remarks', 'up 4% year-on-year', 'opened in May', 'about the office that was opened', 'The office was', 'The company will'];
+  const quote = 'The Denver office opened in May.';
+  const input = source([...fragments, quote].join('\n'));
+  const { claude, requests } = claudeStub([{ claims: [...fragments, quote].map(quote => ({ type: 'text', quote })) }]);
+  const notes: ExtractionNote[] = [];
+  let calls = 0;
+  const result = await checkClaims([input], [source(quote, 'proof.txt')], { async ask() {
+    calls++; return { probability: 0.1, mocked: false };
+  } }, { claude, extractor: createClaimExtractor(claude, note => notes.push(note)) });
+  assert.equal(calls, 1); assert.equal(requests.length, 1, 'low-support reason skips explanation');
+  assert.equal(notes[0]!.non_claims, fragments.length);
+  assert.equal(result.findings.length, 1); assert.equal(result.findings[0]!.decision, 'NEEDS_REVIEW');
+  assert.match(result.findings[0]!.explanation, /Jev found no support in the proof/);
+  assert.match(requests[0]!.system, /complete checkable statements/);
+  // The checker also applies the gate to injected/fallback extraction paths.
+  const bypass = await checkClaims([input], [source(input.text)], neverJev, {
+    extractor: async () => ({ claims: fragments.map(quote => ({ metric: 'text', quote, source: input, period: null, money: null })), mocked: false }),
+  });
+  assert.deepEqual(bypass.findings, []);
+});
+
+test('Jev: only complete assertions can get YES; low scores never set NO', async () => {
+  const quote = 'The Denver office opened in May.';
+  for (const probability of [0.06, 0.2, 0.5, 0.79999, 0.8, 0.99]) {
+    const { claude } = claudeStub([{ claims: [{ type: 'text', quote }] }, { explanation: 'The quotes state that the office opened.' }]);
+    const result = await checkClaims([source(quote)], [source(quote)], { async ask() { return { probability, mocked: false }; } }, { claude });
+    const finding = result.findings[0]!;
+    assert.equal(finding.decision, probability >= 0.8 ? 'YES' : 'NEEDS_REVIEW');
+    assert.equal(finding.jev_probability, probability);
+    if (probability < 0.8) assert.match(finding.explanation, /^Jev found no support in the proof/);
+  }
+  assert.equal(completeAssertion('Revenue of $62.7 billion'), false);
+  assert.equal(checkableClaim('Revenue of $62.7 billion'), true);
+});
+
+test('middle-of-chunk claims: local USD, heading period and per-share scale survive comparative and foreign context', async () => {
+  const quotes = ['Revenue of $62.7 billion', 'net income of US$18.6 billion', 'EPS of $6.43'];
+  const text = 'Example Bank Q3 2028 earnings call\nCurrency: EUR\n'
+    + 'We reported net income of $9.1 billion in Q2 2028 and $8.2 billion in Q3 2027.\n'
+    + '($ in millions, except per share data)\n\n' + 'Opening discussion about operations. '.repeat(230)
+    + `\nOur European unit settles fees in euros. ${quotes.join(', ')}.\n` + 'Closing discussion. '.repeat(180);
+  const chunks = splitChunks(text);
+  assert.ok(chunks.length > 1);
+  assert.ok(text.indexOf(quotes[0]!) > 6000);
+  for (const alias of ['3Q28', '3Q 2028', 'third quarter']) {
+    const proof = `Example Bank FY2028 results\n($ in millions, except per share data)\n${alias}\nNet revenue 62,700\nNet income 18,600\nDiluted earnings per share $6.43\n\nThe overseas team paid fees in euros.`;
+    const { claude } = chunkClaude(chunk => ({ claims: quotes.filter(quote => chunk.includes(quote)).map(quote => ({
+      type: 'money', quote, amount: /(?:US)?\$[\d.]+(?: billion)?/.exec(quote)![0], unit: 'USD', period: '3Q28',
+    })) }));
+    const extraction = await createClaimExtractor(claude, () => {})(source(text, 'invented-call.txt'));
+    assert.deepEqual(extraction.claims.map(claim => claim.period), ['2028-Q3', '2028-Q3', '2028-Q3']);
+    assert.deepEqual(extraction.claims.map(claim => claim.money?.cents), [6270000000000n, 1860000000000n, 643n]);
+    const result = await checkClaims([source(text, 'invented-call.txt')], [source(proof, 'invented-release.txt')], neverJev,
+      { claude, extractor: async () => extraction });
+    assert.equal(result.period, '2028-Q3');
+    assert.deepEqual(result.findings.map(f => f.decision), ['YES', 'YES', 'YES'], alias);
+    assert.ok(result.findings.every(f => !f.mocked && f.gap_usd === '0.00'));
+  }
+});
+
+test('currency boundaries: USD tables survive unrelated foreign paragraphs/tables; same-table and same-sentence mixes fail closed', async () => {
+  const quote = 'Revenue of $62.7 billion';
+  const run = async (proof: string, claim = quote, prefix = 'Example Bank Q3 2028 earnings call\n') => {
+    const { claude } = chunkClaude(() => ({ claims: [{ type: 'money', quote: claim, amount: /\$[\d.]+(?: billion)?/.exec(claim)![0], unit: '', period: '' }] }));
+    return (await checkClaims([source(`${prefix}${claim}.`)], [source(proof)], neverJev, { claude })).findings[0]!;
+  };
+  const usd = 'Example Bank Q3 2028 results\n($ in millions)\nNet revenue 62,700';
+  assert.equal((await run(usd, quote, 'Example Bank Q3 2028 earnings call\nWe settle fees in euros.\n')).decision, 'YES');
+  assert.equal((await run(`${usd}\n\nWe settle fees in euros.`)).decision, 'YES');
+  assert.equal((await run('Example Bank Q3 2028 results\nWe settle fees in euros.\nNet revenue $62.7 billion')).decision, 'YES');
+  assert.equal((await run(`${usd}\n\n(euros in millions)\nOverseas cost 200`)).decision, 'YES');
+  const foreign = await run('Example Bank Q3 2028 results\n(\u20ac in millions)\nNet revenue 62,700');
+  assert.equal(foreign.decision, 'NEEDS_REVIEW'); assert.equal(foreign.proof_usd, null);
+  assert.match(foreign.explanation, /not clearly in US dollars/);
+  const tableMix = await run(`${usd}\nOverseas fees EUR 200`);
+  assert.equal(tableMix.decision, 'NEEDS_REVIEW'); assert.equal(tableMix.proof_usd, null);
+  const sentenceMix = await run(usd, quote, 'Example Bank Q3 2028 earnings call\nFees were paid in euros and we reported ');
+  assert.equal(sentenceMix.decision, 'NEEDS_REVIEW'); assert.equal(sentenceMix.claimed_usd, null);
 });
 
 test('currency: a "$100 million" claim against "€100 million" proof is NEEDS_REVIEW, not YES, and never reaches Jev', async () => {
@@ -1132,11 +1217,10 @@ test('compound claims: a level and its change are split; only the level is check
   const compound = 'Revenue of $47.9 billion, up 3% year-on-year';
   const { jev, state } = countingJev();
   const result = await callCheck(`${compound}.`, [moneyClaim(compound, '$47.9 billion', '')], pdfRelease, jev);
-  assert.equal(result.findings.length, 2);
+  assert.equal(result.findings.length, 1);
   const level = result.findings.find(f => f.claim === 'Revenue of $47.9 billion')!;
-  const change = result.findings.find(f => f.claim === 'up 3% year-on-year')!;
   assert.equal(level.decision, 'YES');
-  assert.equal(change.decision, 'NEEDS_REVIEW'); assert.match(change.explanation, /change/); assert.equal(change.proof_source, null);
+  assert.equal(result.findings.some(f => f.claim === 'up 3% year-on-year'), false, 'subjectless fragment is dropped');
   // A quote Claude adds that is not in the source is dropped by code, as before.
   const dropped = await callCheck('Revenue of $47.9 billion in the third quarter.', [moneyClaim('Revenue of $47.9 billion in Q3', '$47.9 billion', ''),
     moneyClaim('Revenue of $47.9 billion in the third quarter', '$47.9 billion', '')], pdfRelease, jev);
@@ -1253,10 +1337,10 @@ for (const path of evidencePaths) {
     assert.equal(state.calls, 0);
   });
 
-  test(`currency per section (${path.name}): a second currency anywhere in the section keeps the amount from being compared`, async () => {
+  test(`currency per section (${path.name}): an unrelated foreign paragraph does not veto USD amounts`, async () => {
     const { jev, state } = countingJev();
     const mixed = await pathCheck(path, 'revenue of $47.9 billion', '$47.9 billion', 'Example Corp. Q3 2026 results\nRevenue of USD 47.9 billion\nFX cost of €2 million', jev);
-    assert.equal(mixed.decision, 'NEEDS_REVIEW'); assert.match(mixed.explanation, /not clearly in US dollars/);
+    assert.equal(mixed.decision, 'YES');
     const clean = await pathCheck(path, 'revenue of $47.9 billion', '$47.9 billion', 'Example Corp. Q3 2026 results\nRevenue of USD 47.9 billion\nFX cost of $2 million', jev);
     assert.equal(clean.decision, 'YES');
     assert.equal(state.calls, 0);

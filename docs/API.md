@@ -95,11 +95,11 @@ and source name; the deterministic contract-status rule below is unchanged.
 
 ### Decision rules
 
-a. Deterministic checks set the decision and matching label directly. Numeric claims use code-computed money gaps after normalizing units and periods: a match gives YES and a mismatch gives NO. If the claim is rounded, it matches when the evidence rounds to it. A quote that cannot be verified word for word in its source gives NEEDS_REVIEW, overriding any earlier decision.
+a. Deterministic checks set the decision and matching label directly. Numeric claims use code-computed money gaps after normalizing units and periods: a match gives YES and a mismatch gives NO. If the claim is rounded, it matches when the evidence rounds to it. A quote that cannot be verified word for word in its source gives NEEDS_REVIEW, overriding any earlier decision. Quotes that are names, speaker or job titles, headings, document titles, topic phrases, questions, or fragments without a subject and a verb or a definite metric value/status are discarded before checking.
 
 b. Contract status is deterministic: any matching register entry marked unsigned gives NO; if none is unsigned but any signing status is unknown, the decision is NEEDS_REVIEW. These decisions hold regardless of Jev's probability. A Jev probability may be retained in the response, but its thresholds cannot override these checks.
 
-c. Only text claims with no deterministic decision use Jev thresholds. Jev answers one yes or no question per claim and evidence passage: probability at or above 0.80 gives YES, at or below 0.20 gives NO, anything between gives NEEDS_REVIEW. These thresholds are configurable and have not been validated.
+c. Only complete text assertions with no deterministic decision use Jev thresholds. Jev answers one yes or no question per claim and relevant evidence passage: probability at or above 0.80 gives YES only for a complete assertion; all lower probabilities give NEEDS_REVIEW. At or below 0.20, the reason is "Jev found no support in the proof". A Jev probability alone never gives NO, including for signed-register evidence; NO requires a deterministic contradiction such as a code-computed amount or percentage mismatch or an unsigned contract entry. These thresholds are configurable and have not been validated.
 
 d. No matching evidence found: NEEDS_REVIEW, and Jev is not called.
 

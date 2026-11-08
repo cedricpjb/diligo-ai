@@ -279,16 +279,35 @@ function JevSection({ probability }: { probability: number | null }) {
   const value = formatProbability(probability)
   return (
     <Section title="Jev probability">
-      {value ? (
-        <div className="flex items-start gap-4 rounded-xl border border-border bg-surface-raised/60 px-4 py-3">
-          <p className="text-2xl leading-none font-semibold tracking-tight tabular-nums">{value}</p>
+      {value && probability !== null ? (
+        <div className="flex flex-col gap-2.5 rounded-xl border border-border bg-surface-raised/60 px-4 py-3">
+          <div className="flex items-center gap-3">
+            <div
+              role="progressbar"
+              aria-label="Jev probability"
+              aria-valuenow={Math.round(Math.min(Math.max(probability, 0), 1) * 100)}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              className="h-2 flex-1 overflow-hidden rounded-full bg-white/10"
+            >
+              <div
+                className="h-full rounded-full bg-foreground"
+                style={{ width: `${Math.round(Math.min(Math.max(probability, 0), 1) * 100)}%` }}
+              />
+            </div>
+            <p className="shrink-0 text-lg leading-none font-semibold tracking-tight tabular-nums">
+              {value}
+            </p>
+          </div>
           <p className="text-sm leading-relaxed text-muted-foreground">
-            Jev’s estimate that the proof supports the claim. It is a confidence signal, not an
-            accuracy score, and it never overrides a check made in code.
+            Jev: how strongly the proof passage supports this sentence (80% or more is needed for
+            YES).
           </p>
         </div>
       ) : (
-        <p className="text-sm text-muted-foreground">Jev was not called for this finding.</p>
+        <p className="text-sm text-muted-foreground">
+          Numbers are checked exactly by code. Jev only judges wording claims.
+        </p>
       )}
     </Section>
   )

@@ -162,6 +162,9 @@ function Results({
       )}
 
       <SummaryRow summary={summary} reviewFirst={findings.length >= MANY_FINDINGS} />
+      <p className="text-xs text-muted-foreground">
+        Code checks numbers and quotes exactly. Jev judges wording against the proof.
+      </p>
       <FindingsTable findings={findings} reviews={reviews} onOpen={openFinding} />
       <SourcesPanel usage={usage} />
 

@@ -1,5 +1,5 @@
-import { toCents } from "./money"
-import type { Decision, Finding, Priority, Source } from "./types"
+import { toCents } from "./money.ts"
+import type { Decision, Finding, Priority, Source } from "./types.ts"
 
 export const DECISION_LABEL: Record<Decision, string> = {
   YES: "YES",
@@ -15,7 +15,16 @@ export const PRIORITY_LABEL: Record<Priority, string> = {
 
 const PRIORITY_RANK: Record<Priority, number> = { high: 0, medium: 1, low: 2 }
 
-/** Priority first (high to low), then the larger dollar gap, then the order the API sent. */
+/** Jev probability, highest first; a finding with no score ranks lowest. */
+function jevRank(finding: Finding): number {
+  return finding.jev_probability ?? -1
+}
+
+/**
+ * Priority first (high to low), then the larger dollar gap, then the order the API sent.
+ * Among NEEDS REVIEW findings, Jev probability (highest first, no-score last) replaces
+ * that priority sort, since those are the ones still waiting on a human read of the wording.
+ */
 export function sortFindings(findings: Finding[]): Finding[] {
   return findings
     .map((finding, index) => ({
@@ -24,7 +33,12 @@ export function sortFindings(findings: Finding[]): Finding[] {
       rank: PRIORITY_RANK[finding.priority] ?? 3,
       gap: Math.abs(toCents(finding.gap_usd) ?? 0),
     }))
-    .sort((a, b) => a.rank - b.rank || b.gap - a.gap || a.index - b.index)
+    .sort((a, b) => {
+      if (a.finding.decision === "NEEDS_REVIEW" && b.finding.decision === "NEEDS_REVIEW") {
+        return jevRank(b.finding) - jevRank(a.finding) || a.index - b.index
+      }
+      return a.rank - b.rank || b.gap - a.gap || a.index - b.index
+    })
     .map((entry) => entry.finding)
 }
 
@@ -97,7 +111,7 @@ export function hasNoProof(finding: Finding): boolean {
 /** At this many findings the list gets filter chips and the review count leads. */
 export const MANY_FINDINGS = 30
 
-export { knownText } from "./known-text"
+export { knownText } from "./known-text.ts"
 
 export interface SourceUsage {
   source: Source

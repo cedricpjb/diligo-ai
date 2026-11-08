@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils"
 
 interface FormCardProps {
   titleId: string
-  step: string
+  step?: string
   title: string
   description: string
   className?: string
@@ -20,7 +20,7 @@ export function FormCard({ titleId, step, title, description, className, childre
       )}
     >
       <header className="flex items-baseline gap-3">
-        <span className="font-mono text-xs text-muted-foreground tabular-nums">{step}</span>
+        {step && <span className="font-mono text-xs text-muted-foreground tabular-nums">{step}</span>}
         <div className="min-w-0">
           <h2 id={titleId} className="text-base font-semibold tracking-tight">
             {title}

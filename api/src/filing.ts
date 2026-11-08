@@ -2,7 +2,8 @@
 // Everything here is deterministic code on integer cents; no model is involved.
 import { AMOUNT_PATTERN, containsMoney, currencyOf, OTHER_CURRENCY, parseMoney, roundTo, unitFromText, unparsedScaleAfter, type Currency } from './money.js';
 export { currencyOf, type Currency } from './money.js';
-import { extractClaims, isMetric, periodsInOrder, stripPeriods } from './extract.js';
+import { extractClaims, isMetric, periodsInOrder, stripPeriods, quarterInYearOf } from './extract.js';
+import { completeAssertion } from './quality.js';
 import type { Claim, Money, SourceText } from './types.js';
 
 // A percentage in 1e-4 percent units (15.7% is 157000) with the precision it was written at.
@@ -37,6 +38,7 @@ const STOPWORDS = new Set(['the', 'a', 'an', 'total', 'reported', 'firmwide', 'm
 const SYNONYMS: Record<string, string> = {
   'net revenue': 'revenue', 'net earning': 'net income', nii: 'net interest income', 'cash on hand': 'cash',
   eps: 'earning per share diluted', 'diluted eps': 'earning per share diluted', 'earning per diluted share': 'earning per share diluted',
+  'diluted earning per share': 'earning per share diluted',
   'earning per share - diluted': 'earning per share diluted',
   rotce: 'return on tangible common equity', roe: 'return on common equity',
 };
@@ -135,8 +137,8 @@ function valueFigure(token: string, label: string, scale: bigint): (Pick<Figure,
       unclear: !perShare && scale !== 1n && OTHER_UNIT.test(label) };
   } catch { return null; }
 }
-// A section runs from an all-caps heading ("CONSUMER & COMMUNITY BANKING (CCB)") to the next one. Its currency evidence
-// is collected over the whole section, so a "$ millions" heading, a "$" amount anywhere in it and a stray "EUR" all count.
+// Segment scope and currency scope are separate: currency belongs to a table
+// (heading plus rows), or a prose sentence, never every paragraph in a segment.
 interface Section { name: string | null; firmwide: boolean; usd: boolean; other: boolean; from: number }
 interface Draft extends Figure { sec: Section; explicit: Currency }
 interface DocLine { text: string; start: number }
@@ -157,22 +159,49 @@ function sectionIndex(source: SourceText): { lines: DocLine[]; at(offset: number
   const titleWords = new Set(lines.slice(0, Math.min(12, firstHeading < 0 ? 12 : firstHeading))
     .flatMap(line => line.text.toLowerCase().match(/[a-z]{5,}/g) ?? []));
   const sections: Section[] = [{ name: null, firmwide: true, usd: false, other: false, from: 0 }];
+  const currencyBlocks = new Map<number, Section>();
+  let heading = { usd: false, other: false };
+  let table: Section | null = null;
+  let lastHeader = false;
+  let previousEnd = 0;
   for (const line of lines) {
+    const blank = /\r?\n\s*\r?\n/.test(source.text.slice(previousEnd, line.start));
+    previousEnd = line.start + line.text.length;
+    if (blank) { table = null; lastHeader = false; }
     if (isHeading(line.text)) {
       const words = line.text.toLowerCase().match(/[a-z]{5,}/g) ?? [];
       // A heading on the document's first line is its title, not a segment.
       sections.push({ name: line.text, firmwide: line === lines[0] || words.some(word => titleWords.has(word)) || /\b(?:firmwide|consolidated|group)\b/i.test(line.text),
         usd: false, other: false, from: line.start });
+      heading = { usd: false, other: false }; table = null; lastHeader = false;
       continue;
     }
     const current = sections[sections.length - 1]!;
     const seen = markers(line.text);
-    current.usd ||= seen.usd; current.other ||= seen.other;
+    const currencyHeader = !/\d/.test(stripPeriods(line.text)) && (seen.usd || seen.other)
+      && (unitFromText(line.text) !== null || /^\s*(?:currency\s*:\s*)?(?:USD|EUR|GBP|CAD|JPY|AUD|CHF|CNY|US\$|\$|\u20ac|\u00a3)\s*$/i.test(line.text));
+    if (currencyHeader) {
+      heading = lastHeader ? { usd: heading.usd || seen.usd, other: heading.other || seen.other } : seen;
+      table = { ...current, ...heading }; lastHeader = true;
+      currencyBlocks.set(line.start, table);
+    } else if (tableRow(line.text) || (table && (/^of\s+which\b/i.test(line.text)
+      || (OTHER_CURRENCY.test(line.text) && /\d/.test(line.text) && !completeAssertion(line.text))))) {
+      table ??= { ...current, ...heading };
+      table.usd ||= seen.usd; table.other ||= seen.other;
+      currencyBlocks.set(line.start, table); lastHeader = false;
+    } else {
+      table = null;
+      currencyBlocks.set(line.start, { ...current, ...heading });
+      // Period headers may sit between a currency heading and its table.
+      if (!periodsInOrder(line.text).length) lastHeader = false;
+    }
   }
-  return { lines, at: offset => [...sections].reverse().find(section => section.from <= offset) ?? sections[0]! };
+  return { lines, at: offset => {
+    const line = [...lines].reverse().find(line => line.start <= offset);
+    return (line && currencyBlocks.get(line.start)) ?? [...sections].reverse().find(section => section.from <= offset) ?? sections[0]!;
+  } };
 }
-// Currency is decided per section, not per number. USD needs a $/US$/USD marker in the section and no other currency
-// marker anywhere in it; any other marker, a mix, or no evidence at all is never USD.
+// A foreign/mixed heading or table stays ambiguous even if one cell has a dollar sign.
 const sectionCurrency = (explicit: Currency, sec: Section): Currency =>
   explicit === 'other' || sec.other ? 'other' : explicit === 'USD' || sec.usd ? 'USD' : 'unknown';
 export function filingFigures(source: SourceText): Figure[] {
@@ -185,6 +214,7 @@ export function filingFigures(source: SourceText): Figure[] {
     const lineScale = unitFromText(line);
     if (lineScale) scale = lineScale;
     const periods = periodsInOrder(line);
+    const relativePeriod = quarterInYearOf(line, period);
     const row = tableRow(line);
     if (row) {
       const key = metricKey(row.label);
@@ -205,6 +235,7 @@ export function filingFigures(source: SourceText): Figure[] {
       // A heading line: several periods head table columns, one period dates the section that follows.
       if (periods.length > 1) columns = periods;
       else if (periods.length === 1) { period = periods[0] ?? null; columns = null; }
+      else if (relativePeriod) { period = relativePeriod; columns = null; }
       continue;
     }
     proseFigures(line, period, section, source, drafts);
@@ -219,12 +250,14 @@ export function legacyFigures(source: SourceText, found: Claim[] = extractClaims
   for (const claim of found) {
     if (!isMetric(claim.metric) || !claim.money || claim.offset === undefined) continue;
     const section = index.at(claim.offset);
-    const explicit = currencyOf(claim.quote);
+    const lineStart = claim.source.text.lastIndexOf('\n', claim.offset - 1) + 1;
+    const lineEnd = claim.source.text.indexOf('\n', claim.offset);
+    const line = claim.source.text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd);
+    const explicit = currencyOf(sentenceAt(line, claim.offset - lineStart));
     const resolved = sectionCurrency(explicit, section);
     // Plain records (the starter CSV, "Revenue USD 100") keep their long-standing meaning: an unscaled amount with no
     // marker anywhere is USD. A scaled amount with no marker ("Revenue was 100 million") could be any currency.
     const currency: Currency = resolved === 'unknown' && !hasScaledAmount(claim.quote) ? 'USD' : resolved;
-    const lineStart = claim.source.text.lastIndexOf('\n', claim.offset - 1) + 1;
     const before = claim.source.text.slice(lineStart, claim.offset);
     out.push({ key: claim.metric, money: claim.money, percent: null, period: claim.period, quote: claim.quote, source,
       currency, section: section.name, firmwide: section.firmwide,
@@ -285,14 +318,23 @@ function proseFigures(line: string, sectionPeriod: string | null, sec: Section, 
     // The amount's own marker (a few characters either side) beats the heading; both USD and foreign is ambiguous.
     const named = /^\s*(?:U\.?S\.?\s+dollars?|USD|euros?|EUR|pounds?|GBP|yen|JPY|yuan|CNY|francs?|CHF|CAD|AUD|INR)\b/i.exec(line.slice(hit.end))?.[0] ?? '';
     const near = currencyOf(`${line.slice(Math.max(0, hit.index - 4), hit.end)} ${named}`);
-    const explicit: Currency = hit.money ? near : 'unknown';
+    const explicit: Currency = hit.money ? (currencyOf(sentenceAt(line, hit.index)) === 'other' ? 'other' : near) : 'unknown';
     const after = line.slice(hit.end, hits[position + 1]?.index ?? line.length);
     const own = [...new Set(periodsInOrder(after))];
     const before = periodsInOrder(line.slice(0, hit.index));
-    const period = own.length === 1 ? own[0]! : linePeriods.length === 1 ? linePeriods[0]! : linePeriods.length === 0 ? sectionPeriod
+    const period = own.length === 1 ? own[0]! : linePeriods.length === 1 ? linePeriods[0]! : linePeriods.length === 0 ? quarterInYearOf(line, sectionPeriod) ?? sectionPeriod
       : before[before.length - 1] ?? null;
     if (!period || period === 'AMBIGUOUS') return;
     out.push({ key, money: hit.money, percent: hit.percent, period, quote: line, source, currency: 'unknown', explicit, unitUnclear: false, basis: basisOf(between.slice(-24)),
       section: sec.name, firmwide: sec.firmwide, sec });
   });
+}
+function sentenceAt(line: string, offset: number): string {
+  let start = 0;
+  for (const boundary of line.matchAll(/[.!?](?:\s+|$)/g)) {
+    const end = boundary.index! + boundary[0].length;
+    if (end > offset) return line.slice(start, end);
+    start = end;
+  }
+  return line.slice(start);
 }

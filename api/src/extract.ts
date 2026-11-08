@@ -2,6 +2,7 @@ import { AMOUNT_PATTERN, containsMoney, currencyOf, parseMoney, unitFromText, un
 import type { Claim, Metric, SourceText } from './types.js';
 import { z } from 'zod';
 import type { Claude } from './claude.js';
+import { checkableClaim } from './quality.js';
 
 const quoteSchema = z.string().min(1).max(12000).regex(/\S/);
 const fieldSchema = z.string().max(128);
@@ -28,6 +29,7 @@ export interface ExtractionNote {
   invalid_claims?: number;
   invalid_fields?: string[];
   split_chunks?: number;
+  non_claims?: number;
 }
 export interface Chunk { start: number; end: number; text: string }
 // Split on the strongest boundary in the second half of each window: a blank line, then a speaker turn
@@ -72,7 +74,7 @@ export function createClaimExtractor(claude: Claude, log: (note: ExtractionNote)
     const read = async (chunk: Chunk, label: string, depth = 0): Promise<Result[]> => {
       let truncated = false;
       const result = await claude.json(claimsSchema,
-        `${EXTRACTION_INSTRUCTIONS} Each claim must match: ${JSON.stringify(z.toJSONSchema(claimSchema))}`,
+        `${EXTRACTION_INSTRUCTIONS} Return only complete checkable statements with a subject and a verb or a definite metric value/status. Exclude names, speaker/job titles, headings, document titles, topic phrases, questions and fragments. Each claim must match: ${JSON.stringify(z.toJSONSchema(claimSchema))}`,
         { text: chunk.text }, CHUNK_MAX_TOKENS, label, () => { truncated = true; });
       // Bound recursive recovery to two splits per path. Children run sequentially inside
       // the parent's worker slot, keeping the global transport limit at three.
@@ -154,6 +156,7 @@ export function createClaimExtractor(claude: Claude, log: (note: ExtractionNote)
       if (offset < 0) offset = source.text.indexOf(item.quote, offsets.get(item.quote) ?? 0);
       if (offset < 0 && source.text.includes(item.quote)) offset = source.text.indexOf(item.quote);
       if (offset < 0) { dropped++; continue; }
+      if (!checkableClaim(item.quote)) { note.non_claims = (note.non_claims ?? 0) + 1; continue; }
       // The same quote at the same place, returned twice (by two chunks or twice by one), is one claim.
       const key = `${offset}\0${item.quote}`;
       if (seen.has(key)) { note.duplicates++; continue; }
@@ -162,13 +165,14 @@ export function createClaimExtractor(claude: Claude, log: (note: ExtractionNote)
       offsets.set(item.quote, offset + item.quote.length);
       let inheritedPeriod: string | null = null;
       let inheritedScale = 1n;
-      let usd = true;
       const headings: string[] = [];
       for (const line of source.text.slice(0, offset).split(/\r?\n/)) {
-        if (!/\b(revenue|cash|debt|contracts?|CT-\d+)\b/i.test(line)) {
-          if (periodFromLine(line)) inheritedPeriod = periodFromLine(line);
+        // Only context headings may change inherited units/periods. An earlier
+        // comparative claim or an analyst's question does not redate the call.
+        if (!checkableClaim(line) && !/\?$/.test(line.trim())) {
+          const headingPeriod = periodFromLine(line);
+          if (headingPeriod && headingPeriod !== 'AMBIGUOUS' && !/\b(?:annual\s+report|form\s+10[- ]?[kq])\b/i.test(line)) inheritedPeriod = headingPeriod;
           if (unitFromText(line)) inheritedScale = unitFromText(line)!;
-          if (/^\s*(?:currency\s*:\s*)?(?:USD|EUR|GBP|CAD|JPY|AUD|CHF|CNY)\b/i.test(line)) usd = /\bUSD\b/i.test(line);
           headings.push(line);
         }
       }
@@ -191,11 +195,17 @@ export function createClaimExtractor(claude: Claude, log: (note: ExtractionNote)
       const lineEnd = source.text.indexOf('\n', offset + item.quote.length);
       const line = source.text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd).replace(/\r$/, '');
       const linePeriod = periodFromLine(line);
+      // Currency is local to the assertion's sentence. Explicit dollars beat
+      // unrelated transcript currencies, but a mixed-currency sentence fails closed.
+      const beforeSentence = line.slice(0, offset - lineStart).split(/[.!?](?:\s+|$)/).pop() ?? '';
+      const afterSentence = line.slice(offset - lineStart + item.quote.length).split(/[.!?](?:\s+|$)/)[0] ?? '';
+      const sentenceCurrency = currencyOf(`${beforeSentence}${item.quote}${afterSentence}`);
+      const quoteCurrency = currencyOf(item.quote);
       const context = [item.quote, line, ...headings].join('\n');
       const claim: Claim = { metric: item.type === 'money' ? 'other-money' : item.type,
         type: item.type, source, quote: item.quote, offset, money: null,
         period: periodFromLine(item.quote) ?? (linePeriod && linePeriod !== 'AMBIGUOUS' ? linePeriod : null)
-          ?? quarterInYearOf(item.quote, inheritedPeriod) ?? inheritedPeriod };
+          ?? quarterInYearOf(item.quote, inheritedPeriod) ?? quarterInYearOf(line, inheritedPeriod) ?? inheritedPeriod };
       if (item.type === 'money') {
         claim.stated = { amount: item.amount, unit: item.unit, period: item.period };
         const metrics = [...new Set(item.quote.toLowerCase().match(/\b(?:revenue|cash|debt)\b/g))];
@@ -209,8 +219,10 @@ export function createClaimExtractor(claude: Claude, log: (note: ExtractionNote)
         }
         const statedPeriod = item.period ? normalizePeriod(item.period) ?? quarterInYearOf(item.period, inheritedPeriod) ?? 'AMBIGUOUS' : claim.period;
         claim.period = claim.period && statedPeriod !== claim.period ? 'AMBIGUOUS' : statedPeriod;
-        const grounded = item.quote.includes(item.amount) && (!item.unit || item.unit.split(/\s+/).every(word => context.includes(word)))
-          && (!item.period || context.includes(item.period));
+        const grounded = item.quote.includes(item.amount) && (!item.unit || item.unit.split(/\s+/).every(word => context.includes(word)
+          || (/^(?:USD|US\$|dollars?)$/i.test(word) && quoteCurrency === 'USD')))
+          && (!item.period || context.includes(item.period) || (statedPeriod !== 'AMBIGUOUS'
+            && (periodFromLine(item.quote) ?? quarterInYearOf(item.quote, inheritedPeriod) ?? inheritedPeriod) === statedPeriod));
         const unit = /^(?:in\s+)?(trillions?|billions?|millions?|thousands?|bn|mm|tn|[KMB])?$/i.exec(item.unit.replace(/\b(?:USD|US|U\.S\.|dollars?|of)\b|\$/gi, ' ').replace(/\s+/g, ' ').trim());
         const numericText = /[+-]?\d[\d,]*(?:\.\d+)?/.exec(item.amount)?.[0];
         const amounts = [...item.quote.matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))]
@@ -225,8 +237,10 @@ export function createClaimExtractor(claude: Claude, log: (note: ExtractionNote)
           if (unparsedScaleAfter(rest) || (!unit && !plainUnit && !otherCurrency)) claim.scaleUnparsed = true;
         }
         try {
-          if (grounded && unit && !claim.scaleUnparsed && usd && (!bare || currency === 'USD') && amounts.length === 1 && !/\b(?:EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b|[\u20ac\u00a3\u00a5]/i.test(item.quote)) {
-            const scale = unit[1] ? parseMoney(`1 ${unit[1]}`).cents / 100n : inheritedScale;
+          const usd = sentenceCurrency !== 'other' && (quoteCurrency === 'USD' || (bare && currency === 'USD'));
+          if (grounded && unit && !claim.scaleUnparsed && usd && amounts.length === 1) {
+            const perShare = /\bEPS\b|\bper\s+(?:[a-z]+\s+){0,2}share\b/i.test(item.quote);
+            const scale = perShare ? 1n : unit[1] ? parseMoney(`1 ${unit[1]}`).cents / 100n : inheritedScale;
             claim.money = parseMoney(amounts[0]![0], scale);
           }
         } catch { }

@@ -113,8 +113,8 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
   const extractor = options.extractor ?? createClaimExtractor(claude);
   const extractions = await Promise.all(claimSources.map(source => options.extract
     ? { claims: options.extract(source), mocked: true } : extractor(source)));
-  const claims = extractions.flatMap(result => result.claims);
-  const extractionMocked = extractions.some(result => result.mocked);
+  // A claim is a mock result only if it came from the regex fallback: its own chunk failed, or its whole source did.
+  const claims = extractions.flatMap(result => result.claims.map(claim => result.mocked && !claim.mocked ? { ...claim, mocked: true } : claim));
   const figures = proofSources.flatMap(source => proofFigures(source, options.evidence));
   const register = proofSources.flatMap(contractRows);
   const ranked: Ranked[] = [];
@@ -123,7 +123,7 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
     const count = (counts.get(claim.metric) ?? 0) + 1;
     counts.set(claim.metric, count);
     const finding = baseFinding(claim, `f-${claim.metric}${count > 1 ? `-${count}` : ''}`);
-    finding.mocked = extractionMocked || claim.source.mocked;
+    finding.mocked = claim.mocked === true || claim.source.mocked;
     let locked = false; // A fixed reason the explainer must not replace.
     const lock = (reason: string, action = 'Obtain matching source evidence and review the claim.') => {
       review(finding, reason); finding.next_action = action; locked = true;

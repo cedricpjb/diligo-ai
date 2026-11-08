@@ -12,7 +12,7 @@ import { compareMoney, containsMoney, decimal, parseMoney } from '../src/money.j
 import { createTranscriber } from '../src/transcribe.js';
 import { filingFigures, legacyFigures } from '../src/filing.js';
 import { createClaude } from '../src/claude.js';
-import { bareMoneyAmount, createClaimExtractor, signedContractsAssertion } from '../src/extract.js';
+import { bareMoneyAmount, claimsSchema, createClaimExtractor, signedContractsAssertion, splitChunks, type ExtractionNote } from '../src/extract.js';
 import type { CheckResponse, Segment, SourceText } from '../src/types.js';
 
 // Block real external calls even on a developer machine with installed keys.
@@ -62,7 +62,7 @@ test('Claude: unfamiliar prose extracts grounded money; code computes gaps; expl
   assert.equal(finding.explanation, 'The claim and the finance report state different revenue amounts.');
   assert.equal(requests.length, 2);
   assert.ok(requests.every(request => request.model === 'claude-sonnet-5-5'));
-  assert.deepEqual(requests.map(request => request.max_tokens), [8192, 256]);
+  assert.deepEqual(requests.map(request => request.max_tokens), [4096, 256]);
   assert.deepEqual(JSON.parse(requests[1]!.messages[0]!.content), { claim_quote: quote, proof_quote: 'revenue,1175000.00' });
 });
 
@@ -75,7 +75,8 @@ test('Claude: hallucinated quotes are dropped, counted without document text, an
   const notes: unknown[] = [];
   const result = await createClaimExtractor(claude, note => notes.push(note))(source(quote));
   assert.equal(result.mocked, false); assert.deepEqual(result.claims.map(claim => claim.quote), [quote]);
-  assert.deepEqual(notes, [{ dropped_claims: 2 }]); assert.equal(requests.length, 1);
+  assert.deepEqual(notes, [{ dropped_claims: 2, chunks: 1, failed_chunks: 0, claims_returned: 3, duplicates: 0, fallback_claims: 0, kept_claims: 1, capped: 0 }]);
+  assert.ok(!JSON.stringify(notes).includes('pharmacies')); assert.equal(requests.length, 1);
   const dropped = claudeStub([{ claims: [{ type: 'text', quote: 'invented' }] }]);
   assert.deepEqual((await createClaimExtractor(dropped.claude, () => {})(source('Revenue USD 100.00'))).claims, []);
 });
@@ -282,13 +283,14 @@ test('Claude: repeated transcript quotes retain distinct segment provenance', as
   assert.deepEqual(result.findings.map(finding => finding.claim_source.speaker), ['A', 'B']);
 });
 
-test('Claude: mixed-source fallback marks the whole check as mocked', async () => {
+test('Claude: mixed-source fallback marks only the findings that used the fallback as mocked', async () => {
   const first = source('Revenue USD 100.00', 'first.txt');
   const second = source('Cash USD 50.00', 'second.txt');
   const { claude } = claudeStub([{ explanation: 'The amounts match.' }, { explanation: 'The amounts match.' }]);
   const result = await checkClaims([first, second], [source('revenue,100.00\ncash,50.00', 'proof.csv')], neverJev,
     { claude, extractor: async input => ({ claims: extractClaims(input), mocked: input === second }) });
-  assert.ok(result.findings.every(finding => finding.mocked));
+  assert.deepEqual(result.findings.map(finding => [finding.claim_source.name, finding.mocked]).sort(),
+    [['first.txt', false], ['second.txt', true]]);
 });
 
 function assertObject(value: unknown, keys: string[]): asserts value is Record<string, unknown> {
@@ -1173,3 +1175,117 @@ for (const path of evidencePaths) {
     assert.equal(state.calls, 0);
   });
 }
+
+// ---- Chunked extraction for long documents, per-chunk fallback, safe diagnostics ---------------------------------
+// Stub transport that answers each chunk from its own text, so tests do not depend on request order.
+function chunkClaude(respond: (text: string) => unknown) {
+  const requests: string[] = [];
+  const failures: Record<string, unknown>[] = [];
+  const transport: Transport = async (url, init) => {
+    assert.equal(url, 'https://api.anthropic.com/v1/messages');
+    const body = JSON.parse(String(init?.body)) as { max_tokens: number; messages: { content: string }[] };
+    const data = JSON.parse(body.messages[0]!.content) as { text?: string };
+    if (data.text === undefined) return Response.json({ stop_reason: 'end_turn', content: [{ type: 'text', text: '{"explanation":"The passages state amounts."}' }] });
+    assert.equal(body.max_tokens, 4096);
+    requests.push(data.text);
+    const out = respond(data.text);
+    if (out && typeof out === 'object' && 'stop_reason' in out) return Response.json(out);
+    return Response.json({ stop_reason: 'end_turn', content: [{ type: 'text', text: typeof out === 'string' ? out : JSON.stringify(out) }] });
+  };
+  return { claude: createClaude('test-only-placeholder', transport, note => failures.push(note)), requests, failures };
+}
+const filler = 'We continue to invest across the franchise and see healthy client activity in every region. '.repeat(22);
+const turnQuote = (index: number) => `Revenue USD ${index + 1}00.00`;
+const longCall = 'Example Corp Q3 2026 earnings call\n\n'
+  + Array.from({ length: 8 }, (_, index) => `Speaker ${index + 1}:\n${filler}${turnQuote(index)} for the quarter.\n\n`).join('');
+const quotesIn = (text: string) => Array.from({ length: 8 }, (_, index) => turnQuote(index)).filter(quote => text.includes(quote))
+  .map(quote => ({ type: 'money', quote, amount: /[\d.]+$/.exec(quote)![0], unit: 'USD', period: '' }));
+
+test('chunking: a long transcript is split on paragraph/speaker boundaries, read chunk by chunk and merged in order', async () => {
+  const chunks = splitChunks(longCall);
+  assert.ok(chunks.length >= 3, `expected several chunks, got ${chunks.length}`);
+  assert.equal(chunks.map(chunk => chunk.text).join(''), longCall);
+  assert.ok(chunks.every(chunk => chunk.text.length <= 6000 && longCall.slice(chunk.start, chunk.end) === chunk.text));
+  assert.ok(chunks.slice(0, -1).every(chunk => chunk.text.endsWith('\n\n')), 'chunks end on a blank line between speaker turns');
+  assert.deepEqual(splitChunks('short text'), [{ start: 0, end: 10, text: 'short text' }]);
+  const { claude, requests, failures } = chunkClaude(text => ({ claims: quotesIn(text) }));
+  const notes: ExtractionNote[] = [];
+  const result = await createClaimExtractor(claude, note => notes.push(note))(source(longCall, 'call.txt'));
+  assert.equal(requests.length, chunks.length); assert.ok(requests.every(text => text.length <= 6000));
+  assert.equal(result.mocked, false);
+  assert.deepEqual(result.claims.map(claim => claim.quote), Array.from({ length: 8 }, (_, index) => turnQuote(index)));
+  assert.ok(result.claims.every(claim => claim.mocked !== true && longCall.slice(claim.offset!, claim.offset! + claim.quote.length) === claim.quote));
+  // Amounts are still read against the full source: the heading above the first chunk dates every claim.
+  assert.ok(result.claims.every(claim => claim.period === '2026-Q3' && claim.money !== null));
+  assert.deepEqual(notes, [{ dropped_claims: 0, chunks: chunks.length, failed_chunks: 0, claims_returned: 8, duplicates: 0, fallback_claims: 0, kept_claims: 8, capped: 0 }]);
+  assert.deepEqual(failures, []);
+});
+
+test('chunking: a truncated chunk falls back to regex for that chunk only; only its findings are mocked; logs carry no text', async () => {
+  const chunks = splitChunks(longCall);
+  const broken = chunks.findIndex(chunk => chunk.text.includes(turnQuote(3)));
+  const { claude, requests, failures } = chunkClaude(text => text === chunks[broken]!.text
+    ? { stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"claims":[{"type":"money","quote":"Reven' }] } : { claims: quotesIn(text) });
+  const notes: ExtractionNote[] = [];
+  const result = await createClaimExtractor(claude, note => notes.push(note))(source(longCall, 'call.txt'));
+  assert.equal(requests.length, chunks.length + 1, 'the failing chunk is retried once');
+  assert.equal(result.mocked, false);
+  assert.deepEqual(result.claims.map(claim => claim.quote), Array.from({ length: 8 }, (_, index) => turnQuote(index)));
+  const fallbackQuotes = quotesIn(chunks[broken]!.text).map(claim => claim.quote);
+  for (const claim of result.claims) assert.equal(claim.mocked === true, fallbackQuotes.includes(claim.quote), claim.quote);
+  assert.deepEqual(failures, [1, 2].map(attempt => ({ event: 'claude_attempt_failed', label: `extract ${broken + 1}/${chunks.length}`, attempt,
+    reason: 'stop_reason', stop_reason: 'max_tokens' })));
+  assert.equal(notes[0]!.failed_chunks, 1); assert.equal(notes[0]!.fallback_claims, fallbackQuotes.length);
+  assert.ok(!/franchise|Revenue|placeholder/.test(JSON.stringify([failures, notes])), 'diagnostics never contain document text or keys');
+  // Through the checker: only findings from the failed chunk are marked mocked.
+  const checked = await checkClaims([source(longCall, 'call.txt')], [source('Unrelated text.', 'proof.txt')], neverJev,
+    { claude, extractor: createClaimExtractor(claude, () => {}) });
+  assertResponse(checked);
+  for (const finding of checked.findings) assert.equal(finding.mocked, fallbackQuotes.includes(finding.claim), finding.claim);
+  // Every chunk failing still falls back for the whole document, exactly as before.
+  const allBad = chunkClaude(() => 'not JSON');
+  const whole = await createClaimExtractor(allBad.claude, () => {})(source(longCall, 'call.txt'));
+  assert.equal(whole.mocked, true); assert.deepEqual(whole.claims, extractClaims(source(longCall, 'call.txt')));
+});
+
+test('chunking: a schema failure names the failing field path, never the value', async () => {
+  const chunks = splitChunks(longCall);
+  const { claude, failures } = chunkClaude(text => text === chunks[0]!.text
+    ? { claims: [{ type: 'money', quote: turnQuote(0), amount: 100, unit: 'USD', period: '' }] } : { claims: quotesIn(text) });
+  const result = await createClaimExtractor(claude, () => {})(source(longCall, 'call.txt'));
+  assert.equal(result.claims.length, 8);
+  assert.deepEqual(failures.map(note => [note.reason, note.path, note.code, note.label]),
+    [1, 2].map(() => ['schema', 'claims.0.amount', 'invalid_type', `extract 1/${chunks.length}`]));
+});
+
+test('chunking: a quote returned by two chunks is one claim; a quote that truly repeats in the source stays two claims', async () => {
+  const repeated = 'Margins were stable.';
+  const text = longCall.replace('Speaker 1:\n', `Speaker 1:\n${repeated} `).replace('Speaker 8:\n', `Speaker 8:\n${repeated} `);
+  const chunks = splitChunks(text);
+  // Every chunk also echoes the first turn's quote, which only appears in the first chunk.
+  const { claude } = chunkClaude(chunk => ({ claims: [...quotesIn(chunk), { type: 'money', quote: turnQuote(0), amount: '100.00', unit: 'USD', period: '' },
+    ...(chunk.includes(repeated) ? [{ type: 'text', quote: repeated }] : [])] }));
+  const notes: ExtractionNote[] = [];
+  const result = await createClaimExtractor(claude, note => notes.push(note))(source(text, 'call.txt'));
+  assert.equal(result.claims.filter(claim => claim.quote === turnQuote(0)).length, 1);
+  // Every later chunk echoes it once, and the first chunk returns it twice (its own and the echo): all collapse to one.
+  assert.equal(notes[0]!.duplicates, chunks.length);
+  const stable = result.claims.filter(claim => claim.quote === repeated);
+  assert.equal(stable.length, 2); assert.notEqual(stable[0]!.offset, stable[1]!.offset);
+});
+
+test('Claude diagnostics: HTTP status, timeout, network and JSON failures are logged as codes only', async () => {
+  const cases: [string, Transport, Record<string, unknown>][] = [
+    ['http', async () => new Response('secret upstream body', { status: 429 }), { reason: 'http_status', status: 429 }],
+    ['timeout', async () => { throw Object.assign(new Error('secret'), { name: 'TimeoutError' }); }, { reason: 'timeout' }],
+    ['network', async () => { throw new Error('secret upstream'); }, { reason: 'network' }],
+    ['json', async () => Response.json({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'secret not json' }] }), { reason: 'json_parse' }],
+  ];
+  for (const [name, transport, expected] of cases) {
+    const notes: Record<string, unknown>[] = [];
+    const claude = createClaude('test-only-placeholder', transport, note => notes.push(note));
+    assert.equal(await claude.json(claimsSchema, 'x', { text: 'secret document' }, 4096, 'extract 1/1'), null, name);
+    assert.deepEqual(notes, [1, 2].map(attempt => ({ event: 'claude_attempt_failed', label: 'extract 1/1', attempt, ...expected })), name);
+    assert.ok(!/secret|placeholder/.test(JSON.stringify(notes)), name);
+  }
+});

@@ -12,15 +12,85 @@ export const claimsSchema = z.strictObject({ claims: z.array(z.discriminatedUnio
 ])).max(300) });
 export interface Extraction { claims: Claim[]; mocked: boolean }
 export type ClaimExtractor = (source: SourceText) => Promise<Extraction>;
-export function createClaimExtractor(claude: Claude, log: (note: { dropped_claims: number }) => void = console.info): ClaimExtractor {
+// Long documents are read in chunks: one call per ~6,000 characters with a modest output limit, so no single answer
+// runs into the output limit or the time limit. Quotes are still verified against the full source.
+export const CHUNK_CHARS = 6000;
+export const CHUNK_MAX_TOKENS = 4096;
+export const MAX_CLAIMS = 300;
+const CHUNK_CONCURRENCY = 6;
+// Counts only: never document text. One note per extracted source.
+export interface ExtractionNote {
+  dropped_claims: number; // quote not found word for word in the source
+  chunks: number; failed_chunks: number; // a failed chunk used the regex fallback after Claude's retry
+  claims_returned: number; duplicates: number; fallback_claims: number; kept_claims: number; capped: number;
+}
+export interface Chunk { start: number; end: number; text: string }
+// Split on the strongest boundary in the second half of each window: a blank line, then a speaker turn
+// ("Name:" or a short name line), then any line break, then a sentence end. Chunks cover the text exactly once.
+export function splitChunks(text: string, size = CHUNK_CHARS): Chunk[] {
+  if (text.length <= size) return [{ start: 0, end: text.length, text }];
+  const lastAfter = (window: string, pattern: RegExp, min: number): number | null => {
+    let best: number | null = null;
+    for (const match of window.matchAll(pattern)) { const at = match.index! + match[0].length; if (at >= min && at < window.length) best = at; }
+    return best;
+  };
+  const chunks: Chunk[] = [];
+  for (let start = 0; start < text.length;) {
+    let end = Math.min(text.length, start + size);
+    if (end < text.length) {
+      const window = text.slice(start, end);
+      const min = Math.floor(size / 2);
+      const cut = lastAfter(window, /\n[ \t]*\n/g, min) ?? lastAfter(window, /\n(?=[A-Z][\w .,'&-]{1,60}:|[A-Z][A-Za-z .,'&-]{1,60}\r?\n)/g, min)
+        ?? lastAfter(window, /\n/g, min) ?? lastAfter(window, /[.!?]["')\]]?\s+/g, min);
+      if (cut !== null) end = start + cut;
+    }
+    chunks.push({ start, end, text: text.slice(start, end) });
+    start = end;
+  }
+  return chunks;
+}
+async function mapLimit<T, R>(items: T[], limit: number, run: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const index = next++; results[index] = await run(items[index]!, index); }
+  }));
+  return results;
+}
+const EXTRACTION_INSTRUCTIONS =
+      'Extract every factual claim from this pitch, memo, or transcript. Make every claim atomic: one metric and one number per claim. Split a compound sentence into separate claims, for example "net income of $15.3 billion, EPS of $5.57, and an ROTCE of 20%" becomes three claims: "net income of $15.3 billion", "EPS of $5.57" and "ROTCE of 20%". Keep the metric name next to its number in each quote and put a change ("up 8%", "year-on-year") in its own claim. Never combine two numbers in one quote. Copy each quote exactly, including whitespace and punctuation, as a contiguous source substring. Use type money, text, or contract. For money, copy the stated amount, unit/currency and period as text, never normalize or compute them. Use empty strings for unstated unit or period. Include sufficient context in the quote to identify the metric, amount, currency and period. Never invent a source or citation. Do not return commentary.';
+export function createClaimExtractor(claude: Claude, log: (note: ExtractionNote) => void = note => console.info(JSON.stringify(note))): ClaimExtractor {
   return async source => {
-    const result = await claude.json(claimsSchema,
-      'Extract every factual claim from this pitch, memo, or transcript. Make every claim atomic: one metric and one number per claim. Split a compound sentence into separate claims, for example "net income of $15.3 billion, EPS of $5.57, and an ROTCE of 20%" becomes three claims: "net income of $15.3 billion", "EPS of $5.57" and "ROTCE of 20%". Keep the metric name next to its number in each quote and put a change ("up 8%", "year-on-year") in its own claim. Never combine two numbers in one quote. Copy each quote exactly, including whitespace and punctuation, as a contiguous source substring. Use type money, text, or contract. For money, copy the stated amount, unit/currency and period as text, never normalize or compute them. Use empty strings for unstated unit or period. Include sufficient context in the quote to identify the metric, amount, currency and period. Never invent a source or citation. Do not return commentary.',
-      { text: source.text }, 8192);
-    if (!result) return { claims: extractClaims(source), mocked: true };
+    const chunks = splitChunks(source.text);
+    const results = await mapLimit(chunks, CHUNK_CONCURRENCY, (chunk, index) =>
+      claude.json(claimsSchema, EXTRACTION_INSTRUCTIONS, { text: chunk.text }, CHUNK_MAX_TOKENS, `extract ${index + 1}/${chunks.length}`));
+    const note: ExtractionNote = { dropped_claims: 0, chunks: chunks.length, failed_chunks: results.filter(result => !result).length,
+      claims_returned: results.reduce((sum, result) => sum + (result?.claims.length ?? 0), 0), duplicates: 0, fallback_claims: 0, kept_claims: 0, capped: 0 };
+    // Every chunk failed (or no key): the whole source uses the regex extractor, exactly as before chunking.
+    if (results.every(result => !result)) {
+      const claims = extractClaims(source);
+      log({ ...note, fallback_claims: claims.length, kept_claims: claims.length });
+      return { claims, mocked: true };
+    }
     const claims: Claim[] = [];
     const offsets = new Map<string, number>();
+    const seen = new Set<string>();
     let dropped = 0;
+    for (const [chunkIndex, result] of results.entries()) {
+    const chunk = chunks[chunkIndex]!;
+    if (!result) {
+      // Only this chunk falls back. The regex extractor reads the source up to the chunk's end so headings above it
+      // still date and scale its amounts; only claims inside the chunk are kept, each marked as a mock result.
+      const fallback = extractClaims({ ...source, text: source.text.slice(0, chunk.end) })
+        .filter(claim => (claim.offset ?? -1) >= chunk.start).map(claim => ({ ...claim, source, mocked: true }));
+      for (const claim of fallback) {
+        const key = `${claim.offset}\0${claim.quote}`;
+        if (seen.has(key)) { note.duplicates++; continue; }
+        if (claims.length >= MAX_CLAIMS) { note.capped++; continue; }
+        seen.add(key); claims.push(claim); note.fallback_claims++;
+      }
+      continue;
+    }
     const queue: (typeof result.claims)[number][] = [...result.claims];
     for (let next = 0; next < queue.length; next++) {
       const labelled = queue[next]!;
@@ -41,8 +111,17 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
           if (level && change && level.includes(item.amount)) { item = { ...item, quote: level }; queue.push({ type: 'text', quote: change }); }
         }
       }
-      const offset = source.text.indexOf(item.quote, offsets.get(item.quote) ?? 0);
+      // Verified word for word against the full source: first inside this chunk, then anywhere in the source.
+      let offset = source.text.indexOf(item.quote, Math.max(chunk.start, offsets.get(item.quote) ?? 0));
+      if (offset >= 0 && offset + item.quote.length > chunk.end) offset = -1;
+      if (offset < 0) offset = source.text.indexOf(item.quote, offsets.get(item.quote) ?? 0);
+      if (offset < 0 && source.text.includes(item.quote)) offset = source.text.indexOf(item.quote);
       if (offset < 0) { dropped++; continue; }
+      // The same quote at the same place, returned twice (by two chunks or twice by one), is one claim.
+      const key = `${offset}\0${item.quote}`;
+      if (seen.has(key)) { note.duplicates++; continue; }
+      if (claims.length >= MAX_CLAIMS) { note.capped++; continue; }
+      seen.add(key);
       offsets.set(item.quote, offset + item.quote.length);
       let inheritedPeriod: string | null = null;
       let inheritedScale = 1n;
@@ -120,7 +199,8 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
       if (signedContractsAssertion(item.quote)) claim.metric = 'contracts';
       claims.push(claim);
     }
-    log({ dropped_claims: dropped });
+    }
+    log({ ...note, dropped_claims: dropped, kept_claims: claims.length });
     return { claims, mocked: false };
   };
 }

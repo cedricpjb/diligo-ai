@@ -13,6 +13,10 @@ export interface Claim {
   type?: 'money' | 'text' | 'contract';
   stated?: { amount: string; unit: string; period: string };
   offset?: number;
+  // Index of the claimed amount inside `quote`; lets code read the metric name that precedes it.
+  amountIndex?: number;
+  // The amount is followed by a scale word code cannot parse. No amount is shown; the claim needs review.
+  scaleUnparsed?: boolean;
 }
 export interface Finding {
   id: string; claim: string;

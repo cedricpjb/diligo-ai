@@ -8,7 +8,7 @@ import { checkClaims, probabilityDecision, verifyQuotes } from '../src/check.js'
 import { ENV_FILE, loadConfig, parseConfig } from '../src/config.js';
 import { contractRows, extractClaims, normalizePeriod } from '../src/extract.js';
 import { createJev, type Jev, type Transport } from '../src/jev.js';
-import { compareMoney, decimal, parseMoney } from '../src/money.js';
+import { compareMoney, containsMoney, decimal, parseMoney } from '../src/money.js';
 import { createTranscriber } from '../src/transcribe.js';
 import { createClaude } from '../src/claude.js';
 import { bareMoneyAmount, createClaimExtractor, signedContractsAssertion } from '../src/extract.js';
@@ -732,3 +732,67 @@ test('HTTP: upstream failures return generic 500 without document text', async (
   const response = await fetch(url, { method: 'POST', body: form() }); assert.equal(response.status, 500);
   assert.deepEqual(await response.json(), { error: 'Unable to complete the check.' });
 }, { jev: { async ask() { throw new Error('private document and credential'); } } }));
+
+// Real starter files, byte for byte (test/fixtures). Claude is stubbed; Jev must never be called for money claims.
+const fixtureText = (name: string) => readFile(new URL(`../../test/fixtures/${name}`, import.meta.url), 'utf8');
+// Contract claims may consult Jev (their decision stays deterministic); anything carrying an amount may not.
+const jevForbidden: Jev = { async ask(evidence, question) {
+  assert.ok(!containsMoney(`${evidence}
+${question}`) && !/(?:revenue|cash|debt)/i.test(evidence), 'Jev must not be called for money claims.');
+  return { probability: 0.04, mocked: true };
+} };
+function dispatchingClaude(claims: unknown[]) {
+  const transport: Transport = async (_url, init) => {
+    const request = JSON.parse(String(init?.body));
+    const output = String(request.system).startsWith('Extract every factual claim') ? { claims }
+      : { explanation: 'The claim and the proof quote state amounts.' };
+    return Response.json({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(output) }] });
+  };
+  return createClaude('test-only-placeholder', transport);
+}
+async function runStarter(claims: unknown[]) {
+  const [summary, finance, register] = await Promise.all(['management-summary.txt', 'finance-report.txt', 'contract-register.txt'].map(fixtureText));
+  return checkClaims([source(summary!, 'management-summary.txt')],
+    [source(finance!, 'finance-report.txt'), source(register!, 'contract-register.txt')], jevForbidden, { claude: dispatchingClaude(claims) });
+}
+function assertStarterFindings(result: CheckResponse) {
+  assertResponse(result);
+  const by = (id: string) => result.findings.find(f => f.id === id)!;
+  const cash = by('f-cash'); const debt = by('f-debt'); const revenue = by('f-revenue'); const contracts = by('f-contracts');
+  assert.deepEqual([revenue.decision, revenue.claimed_usd, revenue.proof_usd, revenue.gap_usd, revenue.gap_pct],
+    ['NO', '1250000.00', '1175000.00', '75000.00', '6.00']);
+  assert.deepEqual([cash.decision, cash.claimed_usd, cash.proof_usd, cash.gap_usd, cash.gap_pct],
+    ['NO', '480000.00', '410000.00', '70000.00', '14.58']);
+  assert.deepEqual([debt.decision, debt.claimed_usd, debt.proof_usd, debt.gap_usd, debt.gap_pct],
+    ['YES', '900000.00', '900000.00', '0.00', '0.00']);
+  assert.equal(cash.proof_source?.name, 'finance-report.txt');
+  assert.equal(cash.proof_source?.quote, 'Cash USD 410,000');
+  assert.equal(contracts.decision, 'NO');
+  assert.equal(contracts.proof_source?.name, 'contract-register.txt');
+  assert.match(contracts.proof_source!.quote, /CT-102 unsigned/);
+  for (const finding of [revenue, cash, debt]) assert.equal(finding.jev_probability, null);
+}
+const sentence = 'Management claims all material contracts are signed.';
+for (const [label, period] of [['model leaves period empty', ''], ['model states the period', '2026 Q3']] as const) {
+  test(`Starter files: amounts quoted without their period still match proof (${label})`, async () => {
+    assertStarterFindings(await runStarter([
+      { type: 'money', quote: 'Revenue USD 1,250,000', amount: '1,250,000', unit: 'USD', period },
+      { type: 'money', quote: 'Cash USD 480,000', amount: '480,000', unit: 'USD', period },
+      { type: 'money', quote: 'Debt USD 900,000', amount: '900,000', unit: 'USD', period },
+      { type: 'contract', quote: sentence },
+    ]));
+  });
+}
+test('Starter files: a quote spanning several metrics is labelled by the amount it names', async () => {
+  const quote = 'Revenue USD 1,250,000. Cash USD 480,000. Debt USD 900,000.';
+  const result = await runStarter([{ type: 'money', quote, amount: '480,000', unit: 'USD', period: '2026 Q3' }]);
+  assert.equal(result.findings[0]!.id, 'f-cash');
+  assert.equal(result.findings[0]!.claimed_usd, '480000.00');
+  assert.equal(result.findings[0]!.proof_usd, '410000.00');
+});
+test('Starter files: deterministic extraction (no Claude) returns all four results', async () => {
+  const [summary, finance, register] = await Promise.all(['management-summary.txt', 'finance-report.txt', 'contract-register.txt'].map(fixtureText));
+  assertStarterFindings(await checkClaims([source(summary!, 'management-summary.txt')],
+    [source(finance!, 'finance-report.txt'), source(register!, 'contract-register.txt')], jevForbidden,
+    { claude: createClaude(undefined, undefined) }));
+});

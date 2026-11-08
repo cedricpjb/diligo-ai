@@ -162,6 +162,25 @@ test('Claude: bare amount labelled text uses the USD heading for a code-computed
   assert.equal(bareMoneyAmount('We have 40 customers.'), null);
 });
 
+test('Claude: bare amount with period qualifier is money; unparseable qualifier needs review without Jev', async () => {
+  const run = async (quote: string, proof = 'FY2025\nrevenue,90.00') => {
+    const { claude } = claudeStub([{ claims: [{ type: 'text', quote }] }, { explanation: 'Compared in code.' }]);
+    return (await checkClaims([source(`Figures in USD\nFY2025\n${quote}`)], [source(proof, 'proof.csv')], neverJev, { claude })).findings[0]!;
+  };
+  const finding = await run('Annual revenue was 100.00 for FY2025.');
+  assert.equal(finding.claimed_usd, '100.00'); assert.equal(finding.proof_usd, '90.00');
+  assert.equal(finding.gap_usd, '10.00'); assert.equal(finding.decision, 'NO'); assert.equal(finding.jev_probability, null);
+  for (const quote of ['Annual revenue was 100.00 in Q3.', 'Annual revenue was 100.00 as of 2026-09-30.', 'Annual revenue was 100.00 in 2025.',
+    'Annual revenue was 100.00 for the year ended December 31, 2025.']) {
+    const result = await run(quote);
+    assert.equal(result.claimed_usd, '100.00', quote); assert.equal(result.jev_probability, null, quote);
+  }
+  for (const quote of ['Annual revenue was 100.00 apiece.', 'Annual revenue was 100.00 across 12 regions for FY2025.']) {
+    const result = await run(quote);
+    assert.equal(result.decision, 'NEEDS_REVIEW', quote); assert.equal(result.claimed_usd, null, quote); assert.equal(result.jev_probability, null, quote);
+  }
+});
+
 test('Claude: signed-contracts sentence labelled text still hits the register check', async () => {
   const quote = 'As of 2026-09-30, our CEO confirmed on the call that all material contracts are signed.';
   const { claude } = claudeStub([{ claims: [{ type: 'text', quote }] }, { explanation: 'The register lists CT-102 as unsigned.' }]);

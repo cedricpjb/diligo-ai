@@ -49,7 +49,7 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
       let bare = false;
       if (item.type !== 'money') {
         const amount = bareMoneyAmount(item.quote);
-        if (amount) { item = { type: 'money', quote: item.quote, amount, unit: '', period: '' }; bare = true; }
+        if (amount !== null) { item = { type: 'money', quote: item.quote, amount, unit: '', period: '' }; bare = true; }
       }
       const context = [item.quote, ...headings].join('\n');
       const claim: Claim = { metric: item.type === 'money' ? 'other-money' : item.type,
@@ -86,12 +86,25 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
 
 // A bare number (no $ or USD) in a sentence about money, ignoring years, dates, quarters, percentages and counted nouns.
 const MONEY_WORDS = /\b(?:revenue|sales|cash|debt|bookings|arr|mrr|income|profit|burn|funding|raised|expenses?|costs?)\b/i;
+// Returns null when the quote is not a money sentence, '' when it is but the amount cannot be parsed safely
+// (the claim then stays NEEDS_REVIEW and never reaches Jev), otherwise the single bare amount.
+const MONTH = String.raw`(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?`;
+const QUALIFIER = /^\s*(?:,\s*)?(?:for|in|as\s+of|as\s+at|during|at|by|ended|ending|through|over|on|since|from|within|per)\b/i;
 export function bareMoneyAmount(quote: string): string | null {
   if (!MONEY_WORDS.test(quote)) return null;
-  const blanked = quote.replace(periodPattern, match => ' '.repeat(match.length)).replace(/\b\d{4}-\d{2}-\d{2}\b/g, match => ' '.repeat(match.length));
-  const found = [...blanked.matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))].filter(match => !/^(?:19|20)\d{2}$/.test(match[0].trim())).filter(match =>
-    !/^\s*(?:%|[a-z])/i.test(blanked.slice(match.index! + match[0].length).replace(/^\.(?!\d)/, '')) || /[KMB]$|illions?$|housands?$/i.test(match[0]));
-  return found.length === 1 ? /[+-]?\d[\d,]*(?:\.\d+)?/.exec(found[0]![0])?.[0] ?? null : null;
+  const blank = (match: string) => ' '.repeat(match.length);
+  const blanked = quote.replace(new RegExp(String.raw`\b${MONTH}\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*(?:19|20)\d{2})?`, 'gi'), blank)
+    .replace(periodPattern, blank).replace(/\b\d{4}-\d{2}-\d{2}\b/g, blank).replace(/\b(?:Q[1-4]|H[12]|FY\s*\d{2})\b/gi, blank);
+  const found = [...blanked.matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))].filter(match => !/^(?:19|20)\d{2}$/.test(match[0].trim()))
+    .filter(match => !/^\s*%/.test(blanked.slice(match.index! + match[0].length)));
+  if (!found.length) return null;
+  if (found.length > 1) return '';
+  const match = found[0]!;
+  const after = blanked.slice(match.index! + match[0].length).replace(/^\.(?!\d)/, '');
+  const scaled = /(?:[KMB]|illions?|housands?)$/i.test(match[0]);
+  // Ordinary period qualifiers may follow; anything else (a counted noun, say) is not safely money.
+  if (/^\s*$/.test(after) || QUALIFIER.test(after) || (scaled && /^\s*[^a-z]/i.test(after))) return /[+-]?\d[\d,]*(?:\.\d+)?/.exec(match[0])?.[0] ?? '';
+  return '';
 }
 // True when a quote, possibly a full sentence, affirms that all (material) contracts are signed.
 // Negated forms ("not all contracts are signed", "contracts are not signed") are not affirmations.

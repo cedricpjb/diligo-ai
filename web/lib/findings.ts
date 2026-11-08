@@ -45,6 +45,8 @@ export interface Summary {
   largestGap: LargestGap | null
   /** How many findings carry a dollar gap. */
   gapCount: number
+  /** Dollar claims that have no proof amount yet, so no gap could be computed. */
+  needsProofCount: number
   mockedCount: number
 }
 
@@ -54,6 +56,7 @@ export function summarize(findings: Finding[]): Summary {
   let needsReview = 0
   let largestGap: LargestGap | null = null
   let gapCount = 0
+  let needsProofCount = 0
   let mockedCount = 0
 
   for (const finding of findings) {
@@ -69,6 +72,9 @@ export function summarize(findings: Finding[]): Summary {
         largestGap = { finding, cents: gap }
       }
     }
+    else if (toCents(finding.claimed_usd) !== null && toCents(finding.proof_usd) === null) {
+      needsProofCount++
+    }
     if (finding.mocked) mockedCount++
   }
 
@@ -78,9 +84,20 @@ export function summarize(findings: Finding[]): Summary {
     needsReview,
     largestGap,
     gapCount,
+    needsProofCount,
     mockedCount,
   }
 }
+
+/** True when a finding has nothing to compare against: no proof quote and no proof amount. */
+export function hasNoProof(finding: Finding): boolean {
+  return finding.proof_source === null && finding.proof_usd === null
+}
+
+/** At this many findings the list gets filter chips and the review count leads. */
+export const MANY_FINDINGS = 30
+
+export { knownText } from "./known-text"
 
 export interface SourceUsage {
   source: Source

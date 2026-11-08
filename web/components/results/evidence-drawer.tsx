@@ -191,7 +191,7 @@ function ProofSection({ finding }: { finding: Finding }) {
     return (
       <Section title="The proof">
         <p className="rounded-xl border border-dashed border-white/20 px-4 py-3 text-sm text-muted-foreground">
-          No matching evidence was found in the proof documents.
+          No matching proof found
         </p>
       </Section>
     )

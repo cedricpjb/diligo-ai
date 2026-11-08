@@ -19,7 +19,7 @@ const NUMBER: Record<Tone, string> = {
 const CARD =
   "flex flex-col gap-3 rounded-2xl border border-border bg-card p-3.5 shadow-card sm:p-5"
 
-export function SummaryRow({ summary }: { summary: Summary }) {
+export function SummaryRow({ summary, reviewFirst }: { summary: Summary; reviewFirst?: boolean }) {
   const counts: { label: string; value: number; note: string; tone: Tone }[] = [
     { label: "YES", value: summary.yes, note: "Backed by the proof", tone: "yes" },
     { label: "NO", value: summary.no, note: "Contradicted by the proof", tone: "no" },
@@ -30,6 +30,8 @@ export function SummaryRow({ summary }: { summary: Summary }) {
       tone: "review",
     },
   ]
+
+  if (reviewFirst) counts.unshift(...counts.splice(2, 1))
 
   return (
     <section aria-label="Summary" className="grid grid-cols-3 gap-3 xl:grid-cols-4">
@@ -57,7 +59,7 @@ export function SummaryRow({ summary }: { summary: Summary }) {
 
 /** One finding's gap, never a sum: adding gaps of different line items means nothing. */
 function LargestGapTile({ summary }: { summary: Summary }) {
-  const { largestGap, gapCount } = summary
+  const { largestGap, gapCount, needsProofCount } = summary
   const pct = largestGap ? formatPct(largestGap.finding.gap_pct) : null
 
   return (
@@ -91,7 +93,18 @@ function LargestGapTile({ summary }: { summary: Summary }) {
             <span aria-hidden>—</span>
             <span className="sr-only">No dollar gap</span>
           </p>
-          <p className="text-xs text-muted-foreground">No dollar claims found</p>
+          <p className="text-xs text-muted-foreground">
+            {needsProofCount > 0 ? (
+              <>
+                <span className="text-foreground">No gaps computed yet</span>
+                <span aria-hidden> · </span>
+                <span className="tabular-nums">{needsProofCount}</span>{" "}
+                {needsProofCount === 1 ? "claim needs" : "claims need"} proof
+              </>
+            ) : (
+              "No dollar claims found"
+            )}
+          </p>
         </>
       )}
     </div>

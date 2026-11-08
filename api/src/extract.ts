@@ -23,7 +23,7 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
     let dropped = 0;
     for (const labelled of result.claims) {
       // Code, not Claude's label, decides whether a quote is money. Money never reaches Jev as text.
-      const item: typeof labelled = labelled.type !== 'money' && containsMoney(labelled.quote)
+      let item: typeof labelled = labelled.type !== 'money' && containsMoney(labelled.quote)
         ? { type: 'money', quote: labelled.quote, unit: '', period: '', amount: /[+-]?\d[\d,]*(?:\.\d+)?/.exec([...labelled.quote
           .matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))].find(match => containsMoney(match[0]))?.[0] ?? '')?.[0] ?? '' }
         : labelled;
@@ -42,6 +42,15 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
           headings.push(line);
         }
       }
+      // The last currency note above the quote decides the currency of bare numbers.
+      const currencyNote = headings.flatMap(line => [...line.matchAll(/\b(USD|US\s+dollars?|EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b|(\$)|([€£¥])/gi)]).pop();
+      const currency: 'USD' | 'other' | null = !currencyNote ? null : currencyNote[2] || /^(?:USD|US)/i.test(currencyNote[1] ?? '') ? 'USD' : 'other';
+      // A bare number in a money sentence (no $ or USD) is money whatever Claude labelled it; its currency comes from context.
+      let bare = false;
+      if (item.type !== 'money') {
+        const amount = bareMoneyAmount(item.quote);
+        if (amount) { item = { type: 'money', quote: item.quote, amount, unit: '', period: '' }; bare = true; }
+      }
       const context = [item.quote, ...headings].join('\n');
       const claim: Claim = { metric: item.type === 'money' ? 'other-money' : item.type,
         type: item.type, source, quote: item.quote, offset, money: null, period: periodFromLine(item.quote) ?? inheritedPeriod };
@@ -59,15 +68,15 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
           .filter(match => /[+-]?\d[\d,]*(?:\.\d+)?/.exec(match[0])?.[0] === numericText
             && !/^(?:[\d,]|\.\d|\w)/.test(item.quote.slice(match.index! + match[0].length)));
         try {
-          if (grounded && unit && usd && amounts.length === 1 && !/\b(?:EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b|[\u20ac\u00a3\u00a5]/i.test(item.quote)) {
+          if (grounded && unit && usd && (!bare || currency === 'USD') && amounts.length === 1 && !/\b(?:EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b|[\u20ac\u00a3\u00a5]/i.test(item.quote)) {
             const scale = unit[1] ? parseMoney(`1 ${unit[1]}`).cents / 100n : inheritedScale;
             claim.money = parseMoney(amounts[0]![0], scale);
           }
         } catch { }
         if (!grounded) claim.period = 'AMBIGUOUS';
-      } else if (item.type === 'contract') {
-        if (signedContractsAssertion(item.quote)) claim.metric = 'contracts';
       }
+      // Whatever Claude's label, a signed-contracts assertion is checked against the register.
+      if (signedContractsAssertion(item.quote)) claim.metric = 'contracts';
       claims.push(claim);
     }
     log({ dropped_claims: dropped });
@@ -75,6 +84,15 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
   };
 }
 
+// A bare number (no $ or USD) in a sentence about money, ignoring years, dates, quarters, percentages and counted nouns.
+const MONEY_WORDS = /\b(?:revenue|sales|cash|debt|bookings|arr|mrr|income|profit|burn|funding|raised|expenses?|costs?)\b/i;
+export function bareMoneyAmount(quote: string): string | null {
+  if (!MONEY_WORDS.test(quote)) return null;
+  const blanked = quote.replace(periodPattern, match => ' '.repeat(match.length)).replace(/\b\d{4}-\d{2}-\d{2}\b/g, match => ' '.repeat(match.length));
+  const found = [...blanked.matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))].filter(match => !/^(?:19|20)\d{2}$/.test(match[0].trim())).filter(match =>
+    !/^\s*(?:%|[a-z])/i.test(blanked.slice(match.index! + match[0].length).replace(/^\.(?!\d)/, '')) || /[KMB]$|illions?$|housands?$/i.test(match[0]));
+  return found.length === 1 ? /[+-]?\d[\d,]*(?:\.\d+)?/.exec(found[0]![0])?.[0] ?? null : null;
+}
 // True when a quote, possibly a full sentence, affirms that all (material) contracts are signed.
 // Negated forms ("not all contracts are signed", "contracts are not signed") are not affirmations.
 export function signedContractsAssertion(quote: string): boolean {

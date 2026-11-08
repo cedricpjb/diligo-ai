@@ -11,7 +11,7 @@ import { createJev, type Jev, type Transport } from '../src/jev.js';
 import { compareMoney, decimal, parseMoney } from '../src/money.js';
 import { createTranscriber } from '../src/transcribe.js';
 import { createClaude } from '../src/claude.js';
-import { createClaimExtractor, signedContractsAssertion } from '../src/extract.js';
+import { bareMoneyAmount, createClaimExtractor, signedContractsAssertion } from '../src/extract.js';
 import type { CheckResponse, Segment, SourceText } from '../src/types.js';
 
 // Block real external calls even on a developer machine with installed keys.
@@ -142,6 +142,34 @@ test('Claude: money mislabelled as text or contract goes through the money path 
   assert.equal(byQuote(words).claimed_usd, '1250000.00'); assert.equal(byQuote(words).decision, 'NEEDS_REVIEW');
   assert.equal(byQuote(broken).claimed_usd, null); assert.equal(byQuote(broken).decision, 'NEEDS_REVIEW');
   assert.ok(result.findings.every(f => f.jev_probability === null));
+});
+
+test('Claude: bare amount labelled text uses the USD heading for a code-computed gap; unknown currency needs review', async () => {
+  const quote = 'Annual revenue was 100.00.';
+  const run = async (text: string) => {
+    const { claude } = claudeStub([{ claims: [{ type: 'text', quote }] }, { explanation: 'Compared in code.' }]);
+    return checkClaims([source(text)], [source('FY2025\nrevenue,80.00', 'proof.csv')], neverJev, { claude });
+  };
+  const known = (await run(`Figures in USD\nFY2025\n${quote}`)).findings[0]!;
+  assert.equal(known.claimed_usd, '100.00'); assert.equal(known.proof_usd, '80.00');
+  assert.equal(known.gap_usd, '20.00'); assert.equal(known.decision, 'NO'); assert.equal(known.jev_probability, null);
+  for (const text of [`FY2025\n${quote}`, `Figures in EUR\nFY2025\n${quote}`]) {
+    const unknown = (await run(text)).findings[0]!;
+    assert.equal(unknown.decision, 'NEEDS_REVIEW'); assert.equal(unknown.claimed_usd, null); assert.equal(unknown.jev_probability, null);
+  }
+  // Years, counts and percentages are not money.
+  assert.equal(bareMoneyAmount('Revenue grew 20% in 2025.'), null);
+  assert.equal(bareMoneyAmount('We have 40 customers.'), null);
+});
+
+test('Claude: signed-contracts sentence labelled text still hits the register check', async () => {
+  const quote = 'As of 2026-09-30, our CEO confirmed on the call that all material contracts are signed.';
+  const { claude } = claudeStub([{ claims: [{ type: 'text', quote }] }, { explanation: 'The register lists CT-102 as unsigned.' }]);
+  const result = await checkClaims([source(quote)], [source(starterRegisterLine, 'contract-register.txt')],
+    { async ask() { return { probability: 0.99, mocked: false }; } }, { claude });
+  const finding = result.findings[0]!;
+  assert.equal(finding.id, 'f-contracts'); assert.equal(finding.decision, 'NO'); assert.equal(finding.jev_probability, 0.99);
+  assert.match(finding.proof_source!.quote, /CT-102 unsigned/); assert.equal(finding.claim_source.quote, quote);
 });
 
 test('Claude: signed-contracts assertion inside a full dated sentence; negation is not an assertion', async () => {

@@ -97,11 +97,7 @@ export function hasNoProof(finding: Finding): boolean {
 /** At this many findings the list gets filter chips and the review count leads. */
 export const MANY_FINDINGS = 30
 
-/** Placeholder text the API uses when it could not name the company or period. */
-export function knownText(value: string | null | undefined): string | null {
-  const text = value?.trim()
-  return text && !/^unknown/i.test(text) ? text : null
-}
+export { knownText } from "./known-text"
 
 export interface SourceUsage {
   source: Source

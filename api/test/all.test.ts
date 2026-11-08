@@ -640,6 +640,32 @@ test('audio: repeated identical claims retain their own segment timestamps', asy
   const result = await checkClaims([{ name: 'call.wav', text: segments.map(s => s.text).join('\n'), segments, mocked: false }], [source('revenue,100.00')], neverJev);
   assert.deepEqual(result.findings.map(f => [f.claim_source.timestamp_start, f.claim_source.speaker]), [[0, 'speaker_0'], [5, 'speaker_1']]);
 });
+test('audio: a recorded claim and the same text claim share decision, amounts and explanation', async () => {
+  const proof = source('FY2025\nrevenue,1175000.00\ncash,410000.00\ndebt,900000.00\nCT-101,signed\nCT-102,unsigned', 'finance-report.txt');
+  const segments: Segment[] = [
+    { source: 'recording.m4a', start: 0, end: 4, speaker: 'speaker_0', text: 'FY2025 results.' },
+    { source: 'recording.m4a', start: 13.1, end: 18.2, speaker: 'speaker_0', text: 'Revenue was $1,250,000.' },
+  ];
+  const audio = await checkClaims([{ name: 'recording.m4a', text: segments.map(s => s.text).join('\n'), segments, mocked: false }], [proof], neverJev);
+  const text = await checkClaims([source('FY2025 results.\nRevenue was $1,250,000.', 'management-summary.txt')], [proof], neverJev);
+  const revenue = (result: CheckResponse) => result.findings.find(f => f.claim.startsWith('Revenue'))!;
+  const [a, t] = [revenue(audio), revenue(text)];
+  for (const key of ['decision', 'label', 'priority', 'claimed_usd', 'proof_usd', 'gap_usd', 'gap_pct', 'explanation'] as const)
+    assert.equal(a[key], t[key], key);
+  assert.deepEqual([a.decision, a.claimed_usd, a.proof_usd, a.gap_usd, a.gap_pct], ['NO', '1250000.00', '1175000.00', '75000.00', '6.00']);
+  assert.deepEqual([a.claim_source.timestamp_start, a.claim_source.timestamp_end, a.claim_source.speaker], [13.1, 18.2, 'speaker_0']);
+});
+test('audio: a recorded claim without a period reviews exactly like the same text claim', async () => {
+  const proof = source('FY2025\nrevenue,1175000.00', 'finance-report.txt');
+  const segment: Segment = { source: 'recording.m4a', start: 13.1, end: 18.2, speaker: 'speaker_0', text: 'Revenue was $1,250,000.' };
+  const audio = await checkClaims([{ name: 'recording.m4a', text: segment.text, segments: [segment], mocked: false }], [proof], neverJev);
+  const text = await checkClaims([source('Revenue was $1,250,000.', 'claims.txt')], [proof], neverJev);
+  const revenue = (result: CheckResponse) => result.findings.find(f => f.claim.startsWith('Revenue'))!;
+  const [a, t] = [revenue(audio), revenue(text)];
+  assert.equal(a.decision, 'NEEDS_REVIEW');
+  for (const key of ['decision', 'label', 'priority', 'claimed_usd', 'proof_usd', 'gap_usd', 'gap_pct', 'explanation'] as const)
+    assert.equal(a[key], t[key], key);
+});
 test('Jev mock: absent key makes no network call', async () => {
   const service = createJev(undefined, async () => assert.fail('No network in mock mode'));
   assert.deepEqual(await service.ask('CT-102,unsigned', 'Are contracts signed?'), { probability: 0.04, mocked: true });

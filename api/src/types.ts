@@ -8,8 +8,10 @@ export interface SourceText {
 }
 export interface Money { cents: bigint; quantum: bigint }
 export interface Claim {
-  metric: Metric | 'contracts'; quote: string; source: SourceText;
+  metric: Metric | 'contracts' | 'text' | 'contract' | 'other-money'; quote: string; source: SourceText;
   period: string | null; money: Money | null;
+  type?: 'money' | 'text' | 'contract';
+  stated?: { amount: string; unit: string; period: string };
   offset?: number;
 }
 export interface Finding {

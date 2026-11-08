@@ -1,6 +1,120 @@
-import { AMOUNT_PATTERN, parseMoney, unitFromText } from './money.js';
+import { AMOUNT_PATTERN, containsMoney, parseMoney, unitFromText } from './money.js';
 import type { Claim, Metric, SourceText } from './types.js';
+import { z } from 'zod';
+import type { Claude } from './claude.js';
 
+const quoteSchema = z.string().min(1).max(12000).regex(/\S/);
+const fieldSchema = z.string().max(128);
+export const claimsSchema = z.strictObject({ claims: z.array(z.discriminatedUnion('type', [
+  z.strictObject({ type: z.literal('money'), quote: quoteSchema, amount: fieldSchema.min(1), unit: fieldSchema, period: fieldSchema }),
+  z.strictObject({ type: z.literal('text'), quote: quoteSchema }),
+  z.strictObject({ type: z.literal('contract'), quote: quoteSchema }),
+])).max(100) });
+export interface Extraction { claims: Claim[]; mocked: boolean }
+export type ClaimExtractor = (source: SourceText) => Promise<Extraction>;
+export function createClaimExtractor(claude: Claude, log: (note: { dropped_claims: number }) => void = console.info): ClaimExtractor {
+  return async source => {
+    const result = await claude.json(claimsSchema,
+      'Extract every factual claim from this pitch, memo, or transcript. Copy each quote exactly, including whitespace and punctuation, as a contiguous source substring. Use type money, text, or contract. For money, copy the stated amount, unit/currency and period as text, never normalize or compute them. Use empty strings for unstated unit or period. Include sufficient context in the quote to identify the metric, amount, currency and period. Never invent a source or citation. Do not return commentary.',
+      { text: source.text }, 4096);
+    if (!result) return { claims: extractClaims(source), mocked: true };
+    const claims: Claim[] = [];
+    const offsets = new Map<string, number>();
+    let dropped = 0;
+    for (const labelled of result.claims) {
+      // Code, not Claude's label, decides whether a quote is money. Money never reaches Jev as text.
+      let item: typeof labelled = labelled.type !== 'money' && containsMoney(labelled.quote)
+        ? { type: 'money', quote: labelled.quote, unit: '', period: '', amount: /[+-]?\d[\d,]*(?:\.\d+)?/.exec([...labelled.quote
+          .matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))].find(match => containsMoney(match[0]))?.[0] ?? '')?.[0] ?? '' }
+        : labelled;
+      const offset = source.text.indexOf(item.quote, offsets.get(item.quote) ?? 0);
+      if (offset < 0) { dropped++; continue; }
+      offsets.set(item.quote, offset + item.quote.length);
+      let inheritedPeriod: string | null = null;
+      let inheritedScale = 1n;
+      let usd = true;
+      const headings: string[] = [];
+      for (const line of source.text.slice(0, offset).split(/\r?\n/)) {
+        if (!/\b(revenue|cash|debt|contracts?|CT-\d+)\b/i.test(line)) {
+          if (periodFromLine(line)) inheritedPeriod = periodFromLine(line);
+          if (unitFromText(line)) inheritedScale = unitFromText(line)!;
+          if (/^\s*(?:currency\s*:\s*)?(?:USD|EUR|GBP|CAD|JPY|AUD|CHF|CNY)\b/i.test(line)) usd = /\bUSD\b/i.test(line);
+          headings.push(line);
+        }
+      }
+      // The last currency note above the quote decides the currency of bare numbers.
+      const currencyNote = headings.flatMap(line => [...line.matchAll(/\b(USD|US\s+dollars?|EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b|(\$)|([€£¥])/gi)]).pop();
+      const currency: 'USD' | 'other' | null = !currencyNote ? null : currencyNote[2] || /^(?:USD|US)/i.test(currencyNote[1] ?? '') ? 'USD' : 'other';
+      // A bare number in a money sentence (no $ or USD) is money whatever Claude labelled it; its currency comes from context.
+      let bare = false;
+      if (item.type !== 'money') {
+        const amount = bareMoneyAmount(item.quote);
+        if (amount !== null) { item = { type: 'money', quote: item.quote, amount, unit: '', period: '' }; bare = true; }
+      }
+      const context = [item.quote, ...headings].join('\n');
+      const claim: Claim = { metric: item.type === 'money' ? 'other-money' : item.type,
+        type: item.type, source, quote: item.quote, offset, money: null, period: periodFromLine(item.quote) ?? inheritedPeriod };
+      if (item.type === 'money') {
+        claim.stated = { amount: item.amount, unit: item.unit, period: item.period };
+        const metrics = [...new Set(item.quote.toLowerCase().match(/\b(?:revenue|cash|debt)\b/g))];
+        if (metrics.length === 1) claim.metric = metrics[0] as Metric;
+        const statedPeriod = item.period ? normalizePeriod(item.period) ?? 'AMBIGUOUS' : claim.period;
+        claim.period = claim.period && statedPeriod !== claim.period ? 'AMBIGUOUS' : statedPeriod;
+        const grounded = item.quote.includes(item.amount) && (!item.unit || item.unit.split(/\s+/).every(word => context.includes(word)))
+          && (!item.period || context.includes(item.period));
+        const unit = /^(?:(?:USD|US dollars?|dollars?|\$)\s*)?(?:(?:in\s+)?(thousands?|millions?|billions?|[KMB]))?(?:\s*(?:USD|US dollars?|dollars?))?$/i.exec(item.unit.trim());
+        const numericText = /[+-]?\d[\d,]*(?:\.\d+)?/.exec(item.amount)?.[0];
+        const amounts = [...item.quote.matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))]
+          .filter(match => /[+-]?\d[\d,]*(?:\.\d+)?/.exec(match[0])?.[0] === numericText
+            && !/^(?:[\d,]|\.\d|\w)/.test(item.quote.slice(match.index! + match[0].length)));
+        try {
+          if (grounded && unit && usd && (!bare || currency === 'USD') && amounts.length === 1 && !/\b(?:EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b|[\u20ac\u00a3\u00a5]/i.test(item.quote)) {
+            const scale = unit[1] ? parseMoney(`1 ${unit[1]}`).cents / 100n : inheritedScale;
+            claim.money = parseMoney(amounts[0]![0], scale);
+          }
+        } catch { }
+        if (!grounded) claim.period = 'AMBIGUOUS';
+      }
+      // Whatever Claude's label, a signed-contracts assertion is checked against the register.
+      if (signedContractsAssertion(item.quote)) claim.metric = 'contracts';
+      claims.push(claim);
+    }
+    log({ dropped_claims: dropped });
+    return { claims, mocked: false };
+  };
+}
+
+// A bare number (no $ or USD) in a sentence about money, ignoring years, dates, quarters, percentages and counted nouns.
+const MONEY_WORDS = /\b(?:revenue|sales|cash|debt|bookings|arr|mrr|income|profit|burn|funding|raised|expenses?|costs?)\b/i;
+// Returns null when the quote is not a money sentence, '' when it is but the amount cannot be parsed safely
+// (the claim then stays NEEDS_REVIEW and never reaches Jev), otherwise the single bare amount.
+const MONTH = String.raw`(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?`;
+const QUALIFIER = /^\s*(?:,\s*)?(?:for|in|as\s+of|as\s+at|during|at|by|ended|ending|through|over|on|since|from|within|per)\b/i;
+export function bareMoneyAmount(quote: string): string | null {
+  if (!MONEY_WORDS.test(quote)) return null;
+  const blank = (match: string) => ' '.repeat(match.length);
+  const blanked = quote.replace(new RegExp(String.raw`\b${MONTH}\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*(?:19|20)\d{2})?`, 'gi'), blank)
+    .replace(periodPattern, blank).replace(/\b\d{4}-\d{2}-\d{2}\b/g, blank).replace(/\b(?:Q[1-4]|H[12]|FY\s*\d{2})\b/gi, blank);
+  const found = [...blanked.matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))].filter(match => !/^(?:19|20)\d{2}$/.test(match[0].trim()))
+    .filter(match => !/^\s*%/.test(blanked.slice(match.index! + match[0].length)));
+  if (!found.length) return null;
+  if (found.length > 1) return '';
+  const match = found[0]!;
+  const after = blanked.slice(match.index! + match[0].length).replace(/^\.(?!\d)/, '');
+  const scaled = /(?:[KMB]|illions?|housands?)$/i.test(match[0]);
+  // Ordinary period qualifiers may follow; anything else (a counted noun, say) is not safely money.
+  if (/^\s*$/.test(after) || QUALIFIER.test(after) || (scaled && /^\s*[^a-z]/i.test(after))) return /[+-]?\d[\d,]*(?:\.\d+)?/.exec(match[0])?.[0] ?? '';
+  return '';
+}
+// True when a quote, possibly a full sentence, affirms that all (material) contracts are signed.
+// Negated forms ("not all contracts are signed", "contracts are not signed") are not affirmations.
+export function signedContractsAssertion(quote: string): boolean {
+  const pattern = /\b(?:all\s+)?(?:(?:of\s+)?(?:our|the)\s+)?(?:material\s+)?contracts\s+(?:are|have\s+been|were)\s+(?:all\s+|now\s+|fully\s+)?signed\b/gi;
+  return [...quote.matchAll(pattern)].some(match => {
+    const before = quote.slice(0, match.index);
+    return !/\b(?:not|no|never|none|n't|nor)\s*$/i.test(before) && !/\b(?:not|never|un)\s*signed\b/i.test(match[0]);
+  }) && !/\bcontracts\s+(?:are|have|were)\s*(?:not|n't|never|been\s+not)\b|\bnot\s+(?:all|every)\b[^.]*\bcontracts?\b|\b(?:not|no)\s+(?:yet\s+)?(?:material\s+)?contracts?\b|\bunsigned\b/i.test(quote);
+}
 const periodPattern = /\b(?:Q[1-4]\s*[-/]?\s*(?:FY\s*)?20\d{2}|(?:FY\s*)?20\d{2}\s*[-/]?\s*Q[1-4]|20\d{2}-\d{2}-\d{2}|(?:FY\s*|fiscal year\s*|year\s+)20\d{2})\b/gi;
 export function normalizePeriod(text: string): string | null {
   const value = text.trim().toUpperCase().replace(/FISCAL YEAR|YEAR/g, 'FY').replace(/\s+/g, '');
@@ -35,8 +149,6 @@ function record(line: string): string[] | null {
   fields.push(field.trim());
   return fields;
 }
-// This is the single claim-extraction boundary for a future Claude implementation.
-// Match source substrings; never execute or follow instructions from documents.
 export function extractClaims(source: SourceText): Claim[] {
   const claims: Claim[] = [];
   let period: string | null = null;
@@ -133,4 +245,4 @@ export function contractRows(source: SourceText): ContractRow[] {
 export function samePeriod(left: string | null, right: string | null): boolean {
   return left !== 'AMBIGUOUS' && right !== 'AMBIGUOUS' && left === right;
 }
-export function isMetric(value: Claim['metric']): value is Metric { return value !== 'contracts'; }
+export function isMetric(value: Claim['metric']): value is Metric { return value === 'revenue' || value === 'cash' || value === 'debt'; }

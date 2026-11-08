@@ -23,15 +23,17 @@ function json(res: ServerResponse, status: number, value: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(value));
 }
-export function createApp(deps: { jev?: Jev; transcriber?: Transcriber; thresholds?: Thresholds; claude?: Claude; audioStore?: AudioStore } = {}) {
+export function createApp(deps: { jev?: Jev; transcriber?: Transcriber; thresholds?: Thresholds; claude?: Claude; audioStore?: AudioStore; allowedOrigins?: readonly string[] } = {}) {
+  const allowedOrigins = deps.allowedOrigins ?? ['http://localhost:3000'];
   const jev = deps.jev ?? createJev();
   const transcriber = deps.transcriber ?? createTranscriber();
   const audioStore = deps.audioStore ?? new AudioStore();
   const server = createServer({ requestTimeout: 150000, headersTimeout: 15000 }, async (req, res) => {
     const savedAudio: string[] = [];
     res.setHeader('Vary', 'Origin');
-    if (req.headers.origin === 'http://localhost:3000') {
-      res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3000');
+    const origin = req.headers.origin;
+    if (origin !== undefined && allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
       res.setHeader('Access-Control-Expose-Headers', 'X-Clip-Start-Ms, X-Clip-End-Ms, X-Clip-Mode');

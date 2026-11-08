@@ -839,6 +839,37 @@ test('HTTP: CORS preflight and unrelated origin', async () => withServer(async u
   assert.equal(preflight.status, 204); assert.match(preflight.headers.get('Access-Control-Allow-Methods')!, /POST/);
   assert.equal((await fetch(url, { method: 'POST', body: form(), headers: { Origin: 'https://unrelated.example' } })).headers.get('Access-Control-Allow-Origin'), null);
 }));
+test('CORS: development origins come only from DEV_CORS_ORIGINS and are strictly validated', () => {
+  assert.deepEqual(parseConfig('').allowedOrigins, ['http://localhost:3000']);
+  assert.deepEqual(parseConfig('DEV_CORS_ORIGINS=   ').allowedOrigins, ['http://localhost:3000']);
+  assert.deepEqual(parseConfig('DEV_CORS_ORIGINS=http://localhost:3100').allowedOrigins, ['http://localhost:3000', 'http://localhost:3100']);
+  assert.deepEqual(parseConfig('DEV_CORS_ORIGINS=http://localhost:3100, http://localhost:3200').allowedOrigins, ['http://localhost:3000', 'http://localhost:3100', 'http://localhost:3200']);
+  for (const bad of ['*', 'https://localhost:3100', 'http://127.0.0.1:3100', 'http://example.com', 'http://localhost:3100/', 'http://localhost:3100,', 'http://localhost:3100,*']) {
+    assert.throws(() => parseConfig(`DEV_CORS_ORIGINS=${bad}`), /Invalid development CORS origin/, bad);
+  }
+});
+test('CORS: development permits both localhost origins and keeps unrelated origins disallowed', async () => {
+  const allowedOrigins = parseConfig('DEV_CORS_ORIGINS=http://localhost:3100').allowedOrigins;
+  await withServer(async url => {
+    for (const origin of ['http://localhost:3000', 'http://localhost:3100']) {
+      const preflight = await fetch(url, { method: 'OPTIONS', headers: { Origin: origin } });
+      assert.equal(preflight.status, 204);
+      assert.equal(preflight.headers.get('Access-Control-Allow-Origin'), origin);
+      assert.equal(preflight.headers.get('Vary'), 'Origin');
+      assert.match(preflight.headers.get('Access-Control-Expose-Headers')!, /X-Clip-Mode/);
+    }
+    for (const origin of ['https://unrelated.example', 'http://localhost:3200', 'http://127.0.0.1:3100']) {
+      assert.equal((await fetch(url, { method: 'OPTIONS', headers: { Origin: origin } })).headers.get('Access-Control-Allow-Origin'), null, origin);
+    }
+  }, { allowedOrigins });
+});
+test('CORS: production configuration does not newly permit localhost:3100', async () => {
+  const allowedOrigins = parseConfig('').allowedOrigins;
+  await withServer(async url => {
+    assert.equal((await fetch(url, { method: 'OPTIONS', headers: { Origin: 'http://localhost:3000' } })).headers.get('Access-Control-Allow-Origin'), 'http://localhost:3000');
+    assert.equal((await fetch(url, { method: 'OPTIONS', headers: { Origin: 'http://localhost:3100' } })).headers.get('Access-Control-Allow-Origin'), null);
+  }, { allowedOrigins });
+});
 test('HTTP: invalid uploads return 400 before paid service calls', async () => withServer(async url => {
   const cases: FormData[] = [];
   let body = form(); body.delete('proof_files'); cases.push(body);

@@ -3,6 +3,20 @@ import { parseEnv } from 'node:util';
 import { DEFAULT_THRESHOLDS, validateThresholds } from './check.js';
 
 export const ENV_FILE = new URL('../../.env', import.meta.url); // compiled api/dist/src -> api/.env
+const WEB_ORIGIN = 'http://localhost:3000';
+
+/** Local-development origins from DEV_CORS_ORIGINS: comma-separated, each exactly http://localhost:<port>. */
+function parseDevOrigins(value: string | undefined): string[] {
+  if (value === undefined || !value.trim()) return [];
+  return value.split(',').map(item => {
+    const origin = item.trim();
+    const url = URL.parse(origin);
+    if (!url || url.protocol !== 'http:' || url.hostname !== 'localhost' || url.origin !== origin) {
+      throw new Error('Invalid development CORS origin.');
+    }
+    return origin;
+  });
+}
 export function parseConfig(contents: string) {
   const env = parseEnv(contents);
   for (const name of ['JEV_YES_THRESHOLD', 'JEV_NO_THRESHOLD']) {
@@ -15,7 +29,8 @@ export function parseConfig(contents: string) {
   validateThresholds(thresholds);
   const port = env.PORT === undefined ? 3001 : Number(env.PORT);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid API port.');
-  return { port, thresholds, jevKey: env.JEV_API_KEY?.trim() || undefined,
+  const allowedOrigins = [WEB_ORIGIN, ...parseDevOrigins(env.DEV_CORS_ORIGINS)];
+  return { port, thresholds, allowedOrigins, jevKey: env.JEV_API_KEY?.trim() || undefined,
     elevenLabsKey: env.ELEVENLABS_API_KEY?.trim() || undefined,
     anthropicKey: env.ANTHROPIC_API_KEY?.trim() || undefined };
 }

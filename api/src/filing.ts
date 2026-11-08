@@ -144,6 +144,9 @@ interface Draft extends Figure { sec: Section; explicit: Currency }
 interface DocLine { text: string; start: number }
 const SECTION_HEADING = /^[A-Z][A-Z &,.'/-]{5,}(?:\s*\([A-Z0-9]{2,8}\))?$/;
 const isHeading = (line: string): boolean => SECTION_HEADING.test(line) && (line.match(/[A-Z]/g) ?? []).length >= 6;
+// Consolidated table headings are not operating segments.
+const FIRMWIDE_HEADING = /^(?:financial highlights|financial results|consolidated (?:financial )?(?:results|statements?|highlights)|firmwide (?:results|highlights))$/i;
+const GENERIC_FINANCIAL_HEADING = /^(?:financial highlights|financial results)$/i;
 function markers(line: string): { usd: boolean; other: boolean } {
   const other = OTHER_CURRENCY.test(line);
   return { other, usd: currencyOf(line.replace(/\b(?:C|A|HK|NZ|S)\$/gi, '')) === 'USD' };
@@ -171,7 +174,9 @@ function sectionIndex(source: SourceText): { lines: DocLine[]; at(offset: number
     if (isHeading(line.text)) {
       const words = line.text.toLowerCase().match(/[a-z]{5,}/g) ?? [];
       // A heading on the document's first line is its title, not a segment.
-      sections.push({ name: line.text, firmwide: line === lines[0] || words.some(word => titleWords.has(word)) || /\b(?:firmwide|consolidated|group)\b/i.test(line.text),
+      const parent = sections[sections.length - 1]!;
+      const inheritedSegment = GENERIC_FINANCIAL_HEADING.test(line.text) && !parent.firmwide;
+      sections.push({ name: inheritedSegment ? parent.name : line.text, firmwide: !inheritedSegment && (line === lines[0] || FIRMWIDE_HEADING.test(line.text) || words.some(word => titleWords.has(word)) || /\b(?:firmwide|consolidated|group)\b/i.test(line.text)),
         usd: false, other: false, from: line.start });
       heading = { usd: false, other: false }; table = null; lastHeader = false;
       continue;

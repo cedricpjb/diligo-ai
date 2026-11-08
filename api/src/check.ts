@@ -5,7 +5,7 @@ import { validProbability, type Jev } from './jev.js';
 import type { CheckResponse, Claim, Decision, Finding, Money, SourceText } from './types.js';
 import { createClaude, explainFinding, type Claude } from './claude.js';
 import { createClaimExtractor, type ClaimExtractor } from './extract.js';
-import { checkableClaim, completeAssertion } from './quality.js';
+import { checkableClaim, completeAssertion, concreteAssertion } from './quality.js';
 
 export interface Thresholds { yes: number; no: number }
 export const DEFAULT_THRESHOLDS: Thresholds = { yes: 0.8, no: 0.2 };
@@ -39,6 +39,8 @@ export function verifyQuotes(finding: Finding, sources: SourceText[]): Finding {
 }
 interface Ranked { finding: Finding; claim: Claim }
 export const FORWARD_LOOKING = 'forward-looking, not verifiable against reported results';
+export const SUBJECTIVE = 'Subjective statement, not verifiable from the proof';
+const subjectiveStatement = (quote: string): boolean => /\b(?:believ(?:e|es|ed|ing)|expect\w*|should|can|could|might|very\s+good\s+returns?|over\s+time)\b/i.test(quote);
 const UNMATCHED = 'The proof does not address this claim: no passage in it matches the claim, so Jev was not asked.';
 const UNPARSED_SCALE = 'The amount has a scale word that could not be parsed, so no amount is shown.';
 const NOT_USD = 'The proof has an amount for this metric and period, but it is not clearly in US dollars (a non-USD currency, or no currency marker), so it was not compared with the USD claim.';
@@ -112,7 +114,7 @@ function baseFinding(claim: Claim, id: string): Finding {
 export async function checkClaims(claimSources: SourceText[], proofSources: SourceText[], jev: Jev,
   options: { ticker?: string; thresholds?: Thresholds; extract?: typeof extractClaims; extractor?: ClaimExtractor; claude?: Claude;
     // Test seam: which evidence paths feed the checks (both by default). Both go through the same validation.
-    evidence?: { legacy?: boolean; filing?: boolean } } = {}): Promise<CheckResponse> {
+    evidence?: { legacy?: boolean; filing?: boolean }; diagnostics?: (counts: Record<string, number>) => void } = {}): Promise<CheckResponse> {
   const thresholds = options.thresholds ?? DEFAULT_THRESHOLDS;
   validateThresholds(thresholds);
   const claude = options.claude ?? createClaude();
@@ -127,6 +129,8 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
   const ranked: Ranked[] = [];
   const explanations: Finding[] = [];
   const counts = new Map<string, number>();
+  const reasons = new Map<string, number>();
+  const note = (code: string) => reasons.set(code, (reasons.get(code) ?? 0) + 1);
   for (const claim of claims) {
     const count = (counts.get(claim.metric) ?? 0) + 1;
     counts.set(claim.metric, count);
@@ -135,8 +139,17 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
     let locked = false; // A fixed reason the explainer must not replace.
     const lock = (reason: string, action = 'Obtain matching source evidence and review the claim.') => {
       review(finding, reason); finding.next_action = action; locked = true;
+      const code = reason === SUBJECTIVE ? 'subjective' : reason === UNMATCHED ? 'metric_period_missing'
+        : reason === ONLY_OTHER_SECTION || reason === OTHER_SECTION ? 'section_mismatch'
+        : reason === BASIS_MISMATCH ? 'basis_mismatch' : reason === NOT_USD ? 'currency_ambiguous'
+        : reason === UNCLEAR_UNIT ? 'unit_ambiguous' : reason === UNREADABLE_AMOUNT ? 'claim_amount_unreadable'
+        : reason === CHANGE_CLAIM ? 'change_claim' : reason === UNPARSED_SCALE ? 'scale_unparsed'
+        : reason.includes(FORWARD_LOOKING) ? 'forward_looking' : 'other_review';
+      note(code);
     };
-    if (claim.metric !== 'contracts' && forwardLooking(claim.quote)) {
+    if (claim.metric !== 'contracts' && subjectiveStatement(claim.quote)) {
+      lock(SUBJECTIVE);
+    } else if (claim.metric !== 'contracts' && forwardLooking(claim.quote)) {
       lock(`This claim is ${FORWARD_LOOKING}.`, 'Check the statement against results once the period is reported.');
     } else if (claim.scaleUnparsed) {
       lock(UNPARSED_SCALE);
@@ -190,6 +203,7 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
             Object.assign(finding, amounts);
             finding.proof_source = { name: proof.source.name, quote: proof.quote, url: null };
             setDecision(finding, supported ? 'YES' : 'NO');
+            note(supported ? 'money_match' : 'money_mismatch');
             finding.explanation = supported ? 'The proof amount matches the claim at its stated precision.' : 'The proof amount differs from the claim after normalizing units and periods.';
             finding.next_action = supported ? 'No action needed for this amount.' : 'Reconcile the reported amount with the proof document.';
           }
@@ -243,6 +257,7 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
           const supported = comparePercent(percent.percent, proof.percent!);
           finding.proof_source = { name: proof.source.name, quote: proof.quote, url: null };
           setDecision(finding, supported ? 'YES' : 'NO');
+          note(supported ? 'percent_match' : 'percent_mismatch');
           finding.explanation = supported ? 'The proof states the same percentage for this metric and period at the claim\'s precision.'
             : 'The proof states a different percentage for this metric and period.';
           finding.next_action = supported ? 'No action needed for this percentage.' : 'Reconcile the reported percentage with the proof document.';
@@ -258,7 +273,7 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
           finding.jev_probability = result.probability;
           finding.mocked ||= result.mocked || passage.source.mocked;
           // Lack of Jev support is not a deterministic contradiction.
-          setDecision(finding, probabilityDecision(result.probability, thresholds) === 'YES' && completeAssertion(claim.quote) ? 'YES' : 'NEEDS_REVIEW');
+          setDecision(finding, probabilityDecision(result.probability, thresholds) === 'YES' && concreteAssertion(claim.quote) ? 'YES' : 'NEEDS_REVIEW');
           finding.explanation = finding.decision === 'YES' ? 'The matching passage supports the claim.' : 'The matching passage needs human review.';
           if (result.probability < thresholds.yes) lock('Jev found no support in the proof');
           finding.next_action = finding.decision === 'YES' ? 'No action needed.' : 'Review the claim against the cited passage.';
@@ -282,6 +297,8 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
       else finding.mocked = true;
     }
   }));
+  (options.diagnostics ?? (counts => console.info(JSON.stringify({ event: 'check_diagnostics', counts }))))
+    (Object.fromEntries([...reasons].sort(([a], [b]) => a.localeCompare(b))));
   const all = [...claimSources, ...proofSources];
   const periods = [...new Set(claims.map(c => c.period).filter((p): p is string => !!p && p !== 'AMBIGUOUS'))];
   const company = all.map(s => /^Company\s*:\s*(.+)$/im.exec(s.text)?.[1]?.trim()).find(Boolean);

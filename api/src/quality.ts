@@ -29,3 +29,11 @@ export function checkableClaim(quote: string): boolean {
     && subject(numeric[0].replace(/[\d$.,+-]/g, ''))) return true;
   return /\b(?:contracts?|CT-\d+|offices?|branches)\b\s+(?:are\s+)?(?:signed|unsigned|open|closed|active|inactive)\b/i.test(quote);
 }
+
+// Jev may support only a concrete, externally checkable text assertion.
+export function concreteAssertion(quote: string): boolean {
+  if (!completeAssertion(quote)) return false;
+  if (/\b\d{1,4}(?:[-\/]\d{1,2}){0,2}\b/.test(quote)) return true;
+  // Proper names or stable identifiers after the opening subject can name an item or event.
+  return /\b(?:[A-Z][a-z]+\s+){1,3}[A-Z][a-z]+\b|\b[A-Z]{2,}[-\d][A-Z\d-]*\b/.test(quote);
+}

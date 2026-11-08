@@ -3,18 +3,29 @@ import type { Money } from './types.js';
 const scales: Record<string, bigint> = {
   k: 1000n, thousand: 1000n, thousands: 1000n,
   m: 1000000n, million: 1000000n, millions: 1000000n,
-  b: 1000000000n, billion: 1000000000n, billions: 1000000000n,
+  mm: 1000000n,
+  b: 1000000000n, bn: 1000000000n, billion: 1000000000n, billions: 1000000000n,
+  tn: 1000000000000n, trillion: 1000000000000n, trillions: 1000000000000n,
 };
-export const AMOUNT_PATTERN = String.raw`(?:USD\s*|\$\s*)?[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*(?:billions?|millions?|thousands?|[KMB])\b)?(?:\s*\(in\s+(?:thousands|millions|billions)\))?`;
+const SCALE_WORDS = String.raw`trillions?|billions?|millions?|thousands?|bn|mm|tn|[KMB]`;
+export const AMOUNT_PATTERN = String.raw`(?:USD\s*|\$\s*)?[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*(?:${SCALE_WORDS})\b)?(?:\s*\(in\s+(?:thousands|millions|billions|trillions)\))?`;
 // Independent of any model label: a dollar sign, USD/dollars, or a scaled number marks money.
-const MONEY_HINT = /(?:\$|\bUSD\b|\bUS\s*dollars?\b)\s*[+-]?\d|\d(?:[\d,]*\d)?(?:\.\d+)?\s*(?:thousand|million|billion|[KMB])\b|\d\s*(?:USD|(?:US\s+)?dollars?)\b/i;
+const MONEY_HINT = /(?:\$|\bUSD\b|\bUS\s*dollars?\b)\s*[+-]?\d|\d(?:[\d,]*\d)?(?:\.\d+)?\s*(?:thousand|million|billion|trillion|bn|mm|tn|[KMB])\b|\d\s*(?:USD|(?:US\s+)?dollars?)\b/i;
 export function containsMoney(text: string): boolean { return MONEY_HINT.test(text); }
 export function unitFromText(text: string): bigint | null {
-  const match = /\bin\s+(thousands|millions|billions)\b/i.exec(text);
+  const match = /\bin\s+(thousands|millions|billions|trillions)\b/i.exec(text)
+    ?? /\b(thousands|millions|billions|trillions)\s+of\s+(?:US\s+)?dollars\b/i.exec(text);
   return match ? scales[match[1]!.toLowerCase()]! : null;
 }
+// A word that looks like a scale ("tril", "crore", "T") but is not one parseMoney understands. The amount before it
+// must never be shown as if it were unscaled.
+export function unparsedScaleAfter(rest: string): boolean {
+  const word = /^\s*([a-z]+)\b/i.exec(rest)?.[1];
+  if (!word || /^(?:thousands?|millions?|billions?|trillions?|bn|mm|tn|k|m|b)$/i.test(word)) return false;
+  return /^(?:t|tril|trill?ions?|trn|bil|bils?|bilions?|bln|mil|mils?|milions?|mln|mn|cr|crores?|lakhs?|quadrillions?|[a-z]*zillions?|hundreds?)$/i.test(word);
+}
 export function parseMoney(text: string, inheritedScale = 1n): Money {
-  const match = /^(?:USD\s*|\$\s*)?([+-]?)(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s*(k|m|b|thousands?|millions?|billions?)?\s*(?:\(in\s+(thousands|millions|billions)\))?$/i.exec(text.trim());
+  const match = /^(?:USD\s*|\$\s*)?([+-]?)(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s*(trillions?|billions?|millions?|thousands?|bn|mm|tn|k|m|b)?\s*(?:\(in\s+(thousands|millions|billions|trillions)\))?$/i.exec(text.trim());
   if (!match || text.length > 128) throw new Error('Invalid USD amount.');
   const [, sign, whole, fraction = '', suffix, units] = match;
   if (suffix && units) throw new Error('Ambiguous money units.');

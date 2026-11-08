@@ -10,6 +10,7 @@ import { contractRows, extractClaims, normalizePeriod } from '../src/extract.js'
 import { createJev, type Jev, type Transport } from '../src/jev.js';
 import { compareMoney, containsMoney, decimal, parseMoney } from '../src/money.js';
 import { createTranscriber } from '../src/transcribe.js';
+import { filingFigures } from '../src/filing.js';
 import { createClaude } from '../src/claude.js';
 import { bareMoneyAmount, createClaimExtractor, signedContractsAssertion } from '../src/extract.js';
 import type { CheckResponse, Segment, SourceText } from '../src/types.js';
@@ -795,4 +796,149 @@ test('Starter files: deterministic extraction (no Claude) returns all four resul
   assertStarterFindings(await checkClaims([source(summary!, 'management-summary.txt')],
     [source(finance!, 'finance-report.txt'), source(register!, 'contract-register.txt')], jevForbidden,
     { claude: createClaude(undefined, undefined) }));
+});
+
+// ---- Real-filing matching: scales, tables, period aliases, forward-looking and unmatched claims ----------------
+const pressRelease = [
+  'JPMorgan Chase Reports Third-Quarter 2026 Net Income of $14.4 billion',
+  '($ in millions, except per share data)',
+  '                              3Q26      2Q26      3Q25     QoQ    YoY',
+  'Net revenue                 46,000    45,300    42,900      2 %    7 %',
+  'Net income                  14,393    14,285    13,419      1 %    7 %',
+  'Provision for credit losses (1,234)      512       897     NM     NM',
+  'CET1 capital ratio            15.7%     15.5%     15.0%',
+  'Diluted earnings per share    $5.07     $5.02     $4.51',
+].join('\n');
+const callHeader = 'JPMorgan Q3 2026 earnings call\n';
+function countingJev() {
+  const state = { calls: 0 };
+  const jev: Jev = { async ask() { state.calls++; return { probability: 0.05, mocked: false }; } };
+  return { jev, state };
+}
+const moneyClaim = (quote: string, amount: string, period = 'third quarter') => ({ type: 'money', quote, amount, unit: '', period });
+async function callCheck(claimText: string, claims: unknown[], proof = pressRelease, jev: Jev = neverJev) {
+  const { claude } = claudeStub([{ claims }]);
+  const result = await checkClaims([source(callHeader + claimText, 'call.txt')], [source(proof, 'release.txt')], jev, { claude });
+  assertResponse(result);
+  return result;
+}
+
+test('money scale: thousand, million, billion and trillion (and k, mm, bn, tn) become integer cents', () => {
+  assert.equal(decimal(parseMoney('$1.4 trillion').cents), '1400000000000.00');
+  assert.equal(parseMoney('$1.4 trillion').cents, 140000000000000n);
+  assert.equal(parseMoney('2 tn').cents, 200000000000000n);
+  assert.equal(parseMoney('$2.5 bn').cents, 250000000000n);
+  assert.equal(parseMoney('$3 mm').cents, 300000000n);
+  assert.equal(parseMoney('750 k').cents, 75000000n);
+  assert.equal(parseMoney('$12 thousand').cents, 1200000n);
+  assert.ok(containsMoney('assets of 1.4 trillion') && containsMoney('$5 tn'));
+});
+
+test('money scale: trillion claim is shown as 1400000000000.00; an unparseable scale word shows no amount and never reaches Jev', async () => {
+  const shown = await callCheck('Our balance sheet holds total assets of $1.4 trillion.',
+    [moneyClaim('total assets of $1.4 trillion', '$1.4 trillion', '')]);
+  assert.equal(shown.findings[0]!.claimed_usd, '1400000000000.00');
+  assert.equal(shown.findings[0]!.decision, 'NEEDS_REVIEW');
+  const { jev, state } = countingJev();
+  const unparsed = await callCheck('Our balance sheet holds total assets of $1.4 tril.',
+    [moneyClaim('total assets of $1.4 tril', '$1.4', '')], pressRelease, jev);
+  const finding = unparsed.findings[0]!;
+  assert.equal(finding.decision, 'NEEDS_REVIEW'); assert.equal(finding.claimed_usd, null);
+  assert.equal(finding.jev_probability, null); assert.equal(state.calls, 0);
+  assert.match(finding.explanation, /scale word that could not be parsed/);
+});
+
+test('periods: 3Q26, Q3 2026, third quarter 2026 and 2026-Q3 are one period', () => {
+  for (const alias of ['3Q26', '3Q2026', 'Q3 2026', 'Q3 FY2026', "Q3'26", 'third quarter 2026', 'Third-Quarter 2026', 'third quarter of 2026', '2026-Q3', '2026 Q3'])
+    assert.equal(normalizePeriod(alias), '2026-Q3', alias);
+  assert.equal(normalizePeriod('3Q25'), '2025-Q3');
+  assert.equal(normalizePeriod('FY2026'), 'FY2026');
+});
+
+test('tables: "$ in millions" scale, period columns and parenthesised negatives are read in integer cents', () => {
+  const figures = filingFigures(source(pressRelease, 'release.txt'));
+  const find = (key: string, period: string) => figures.filter(f => f.key === key && f.period === period);
+  assert.equal(find('net income', '2026-Q3').find(f => f.quote.startsWith('Net income'))!.money!.cents, 1439300000000n);
+  assert.equal(find('net income', '2025-Q3').find(f => f.quote.startsWith('Net income'))!.money!.cents, 1341900000000n);
+  assert.equal(find('revenue', '2026-Q3')[0]!.money!.cents, 4600000000000n);
+  assert.equal(find('provision for credit loss', '2026-Q3')[0]!.money!.cents, -123400000000n);
+  assert.equal(find('diluted earning per share', '2026-Q3')[0]!.money!.cents, 507n); // per-share rows ignore the millions header
+  assert.equal(find('cet1 capital ratio', '2026-Q3')[0]!.percent!.value, 157000n);
+  assert.equal(figures.some(f => f.period === null), false);
+});
+
+test('scaled amount across a table: "$14.4 billion" in the third quarter matches 14,393 (in millions) for 3Q26', async () => {
+  const quote = 'net income of $14.4 billion in the third quarter';
+  const yes = await callCheck(`We delivered ${quote}.`, [moneyClaim(quote, '$14.4 billion')]);
+  const finding = yes.findings[0]!;
+  assert.equal(finding.decision, 'YES'); assert.equal(finding.label, 'supported');
+  assert.equal(finding.claimed_usd, '14400000000.00'); assert.equal(finding.proof_usd, '14393000000.00');
+  assert.equal(finding.gap_usd, '7000000.00'); assert.equal(finding.jev_probability, null);
+  assert.ok(finding.proof_source!.quote.startsWith('Net income'));
+  const no = await callCheck('We delivered net income of $15.4 billion in 3Q26.', [moneyClaim('net income of $15.4 billion in 3Q26', '$15.4 billion', '3Q26')]);
+  assert.equal(no.findings[0]!.decision, 'NO'); assert.equal(no.findings[0]!.gap_usd, '1007000000.00'); assert.equal(no.findings[0]!.gap_pct, '6.54');
+  // The figure for another period is never used for this claim.
+  const prior = await callCheck('We delivered net income of $14.4 billion in 3Q25.', [moneyClaim('net income of $14.4 billion in 3Q25', '$14.4 billion', '3Q25')]);
+  assert.equal(prior.findings[0]!.decision, 'NO'); assert.equal(prior.findings[0]!.proof_usd, '13419000000.00');
+});
+
+test('period alias: a "Q3 2026" claim finds the "3Q26" table column', async () => {
+  const quote = 'Revenue for Q3 2026 was $46.0 billion';
+  const result = await callCheck(`${quote}.`, [moneyClaim(quote, '$46.0 billion', 'Q3 2026')]);
+  assert.equal(result.findings[0]!.decision, 'YES'); assert.equal(result.findings[0]!.proof_usd, '46000000000.00');
+});
+
+test('forward-looking or hedged claims need review with the stated reason and never reach Jev', async () => {
+  const { jev, state } = countingJev();
+  for (const quote of ['We expect net income of about $15 billion next quarter', 'Net income will probably be $16.0 billion', 'Something like $50 billion of revenue for the full year is our guidance']) {
+    const result = await callCheck(`${quote}.`, [moneyClaim(quote, /\$[\d.]+ billion/.exec(quote)![0])], pressRelease, jev);
+    const finding = result.findings[0]!;
+    assert.equal(finding.decision, 'NEEDS_REVIEW', quote); assert.equal(finding.label, 'insufficient');
+    assert.match(finding.explanation, /forward-looking, not verifiable against reported results/);
+    assert.equal(finding.proof_source, null); assert.equal(finding.jev_probability, null);
+  }
+  const text = await callCheck('We are going to open a new office in Boston.', [{ type: 'text', quote: 'We are going to open a new office in Boston' }],
+    'We opened an office in Boston.', jev);
+  assert.equal(text.findings[0]!.decision, 'NEEDS_REVIEW'); assert.match(text.findings[0]!.explanation, /forward-looking/);
+  assert.equal(state.calls, 0);
+});
+
+test('an unmatched claim is NEEDS_REVIEW with the proof-does-not-address explanation and no Jev call', async () => {
+  const { jev, state } = countingJev();
+  const quote = 'tangible book value of $100 billion in the third quarter';
+  const money = await callCheck(`We reported ${quote}.`, [moneyClaim(quote, '$100 billion')], pressRelease, jev);
+  assert.equal(money.findings[0]!.decision, 'NEEDS_REVIEW');
+  assert.match(money.findings[0]!.explanation, /proof does not address this claim/);
+  assert.equal(money.findings[0]!.proof_source, null); assert.equal(money.findings[0]!.gap_usd, null);
+  const text = await callCheck('We opened a branch in Singapore.', [{ type: 'text', quote: 'We opened a branch in Singapore' }], pressRelease, jev);
+  assert.equal(text.findings[0]!.decision, 'NEEDS_REVIEW'); assert.match(text.findings[0]!.explanation, /proof does not address this claim/);
+  assert.equal(state.calls, 0);
+  // Missing proof is never a NO, even when the claim's period has no column.
+  const period = await callCheck('We reported net income of $14.4 billion in the first quarter.',
+    [moneyClaim('net income of $14.4 billion in the first quarter', '$14.4 billion', 'first quarter')], pressRelease, jev);
+  assert.equal(period.findings[0]!.decision, 'NEEDS_REVIEW'); assert.equal(state.calls, 0);
+});
+
+test('percent claims: compared in code for the same metric and period, otherwise NEEDS_REVIEW without Jev', async () => {
+  const { jev, state } = countingJev();
+  const yes = await callCheck('Our CET1 capital ratio was 15.7% in the third quarter.',
+    [{ type: 'text', quote: 'Our CET1 capital ratio was 15.7% in the third quarter' }], pressRelease, jev);
+  assert.equal(yes.findings[0]!.decision, 'YES'); assert.equal(yes.findings[0]!.claimed_usd, null);
+  const no = await callCheck('Our CET1 capital ratio was 16.2% in the third quarter.',
+    [{ type: 'text', quote: 'Our CET1 capital ratio was 16.2% in the third quarter' }], pressRelease, jev);
+  assert.equal(no.findings[0]!.decision, 'NO');
+  for (const quote of ['Our CET1 capital ratio was 15.7% in the first quarter', 'Our liquidity coverage ratio was 112% in the third quarter', 'Net income was up 7% in the third quarter']) {
+    const review = await callCheck(`${quote}.`, [{ type: 'text', quote }], pressRelease, jev);
+    assert.equal(review.findings[0]!.decision, 'NEEDS_REVIEW', quote);
+  }
+  assert.equal(state.calls, 0);
+});
+
+test('text claims reach Jev only when code found a relevant passage', async () => {
+  const proof = 'The Boston office remains closed pending permits.\nUnrelated line about weather.';
+  const { jev, state } = countingJev();
+  const hit = await callCheck('The Boston office opened in May.', [{ type: 'text', quote: 'The Boston office opened in May.' }], proof, jev);
+  assert.equal(state.calls, 1); assert.equal(hit.findings[0]!.decision, 'NO');
+  const weak = await callCheck('The office was great.', [{ type: 'text', quote: 'The office was great.' }], proof, jev);
+  assert.equal(state.calls, 1); assert.equal(weak.findings[0]!.decision, 'NEEDS_REVIEW');
 });

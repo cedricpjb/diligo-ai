@@ -1,4 +1,4 @@
-import { AMOUNT_PATTERN, containsMoney, parseMoney, unitFromText } from './money.js';
+import { AMOUNT_PATTERN, containsMoney, parseMoney, unitFromText, unparsedScaleAfter } from './money.js';
 import type { Claim, Metric, SourceText } from './types.js';
 import { z } from 'zod';
 import type { Claude } from './claude.js';
@@ -60,7 +60,8 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
       const context = [item.quote, line, ...headings].join('\n');
       const claim: Claim = { metric: item.type === 'money' ? 'other-money' : item.type,
         type: item.type, source, quote: item.quote, offset, money: null,
-        period: periodFromLine(item.quote) ?? (linePeriod && linePeriod !== 'AMBIGUOUS' ? linePeriod : inheritedPeriod) };
+        period: periodFromLine(item.quote) ?? (linePeriod && linePeriod !== 'AMBIGUOUS' ? linePeriod : null)
+          ?? quarterInYearOf(item.quote, inheritedPeriod) ?? inheritedPeriod };
       if (item.type === 'money') {
         claim.stated = { amount: item.amount, unit: item.unit, period: item.period };
         const metrics = [...new Set(item.quote.toLowerCase().match(/\b(?:revenue|cash|debt)\b/g))];
@@ -72,17 +73,25 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
             .exec(item.quote.slice(0, at))?.[1];
           if (label) claim.metric = /revenue/i.test(label) ? 'revenue' : /cash/i.test(label) ? 'cash' : 'debt';
         }
-        const statedPeriod = item.period ? normalizePeriod(item.period) ?? 'AMBIGUOUS' : claim.period;
+        const statedPeriod = item.period ? normalizePeriod(item.period) ?? quarterInYearOf(item.period, inheritedPeriod) ?? 'AMBIGUOUS' : claim.period;
         claim.period = claim.period && statedPeriod !== claim.period ? 'AMBIGUOUS' : statedPeriod;
         const grounded = item.quote.includes(item.amount) && (!item.unit || item.unit.split(/\s+/).every(word => context.includes(word)))
           && (!item.period || context.includes(item.period));
-        const unit = /^(?:(?:USD|US dollars?|dollars?|\$)\s*)?(?:(?:in\s+)?(thousands?|millions?|billions?|[KMB]))?(?:\s*(?:USD|US dollars?|dollars?))?$/i.exec(item.unit.trim());
+        const unit = /^(?:(?:USD|US dollars?|dollars?|\$)\s*)?(?:(?:in\s+)?(trillions?|billions?|millions?|thousands?|bn|mm|tn|[KMB]))?(?:\s*(?:USD|US dollars?|dollars?))?$/i.exec(item.unit.trim());
         const numericText = /[+-]?\d[\d,]*(?:\.\d+)?/.exec(item.amount)?.[0];
         const amounts = [...item.quote.matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))]
           .filter(match => /[+-]?\d[\d,]*(?:\.\d+)?/.exec(match[0])?.[0] === numericText
             && !/^(?:[\d,]|\.\d|\w)/.test(item.quote.slice(match.index! + match[0].length)));
+        // A scale word code cannot parse ("1.4 tril") must never be dropped: the bare number would pass as dollars.
+        if (amounts.length === 1) {
+          claim.amountIndex = amounts[0]!.index;
+          const rest = item.quote.slice(amounts[0]!.index! + amounts[0]![0].length);
+          const plainUnit = /^(?:USD|US dollars?|dollars?|\$)?$/i.test(item.unit.trim());
+          const otherCurrency = /\b(?:EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b|[€£¥]/i.test(item.unit);
+          if (unparsedScaleAfter(rest) || (!unit && !plainUnit && !otherCurrency)) claim.scaleUnparsed = true;
+        }
         try {
-          if (grounded && unit && usd && (!bare || currency === 'USD') && amounts.length === 1 && !/\b(?:EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b|[\u20ac\u00a3\u00a5]/i.test(item.quote)) {
+          if (grounded && unit && !claim.scaleUnparsed && usd && (!bare || currency === 'USD') && amounts.length === 1 && !/\b(?:EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b|[\u20ac\u00a3\u00a5]/i.test(item.quote)) {
             const scale = unit[1] ? parseMoney(`1 ${unit[1]}`).cents / 100n : inheritedScale;
             claim.money = parseMoney(amounts[0]![0], scale);
           }
@@ -129,14 +138,41 @@ export function signedContractsAssertion(quote: string): boolean {
     return !/\b(?:not|no|never|none|n't|nor)\s*$/i.test(before) && !/\b(?:not|never|un)\s*signed\b/i.test(match[0]);
   }) && !/\bcontracts\s+(?:are|have|were)\s*(?:not|n't|never|been\s+not)\b|\bnot\s+(?:all|every)\b[^.]*\bcontracts?\b|\b(?:not|no)\s+(?:yet\s+)?(?:material\s+)?contracts?\b|\bunsigned\b/i.test(quote);
 }
-const periodPattern = /\b(?:Q[1-4]\s*[-/]?\s*(?:FY\s*)?20\d{2}|(?:FY\s*)?20\d{2}\s*[-/]?\s*Q[1-4]|20\d{2}-\d{2}-\d{2}|(?:FY\s*|fiscal year\s*|year\s+)20\d{2})\b/gi;
+// Period spellings: Q3 2026, 2026-Q3, 3Q26, 3Q2026, Q3'26, "third quarter 2026", FY2026, 2026-09-30.
+const periodPattern = /\b(?:Q[1-4]\s*[-/]?\s*(?:FY\s*)?20\d{2}|(?:FY\s*)?20\d{2}\s*[-/]?\s*Q[1-4]|20\d{2}-\d{2}-\d{2}|(?:FY\s*|fiscal year\s*|year\s+)20\d{2}|[1-4]Q\s*['’]?\s*(?:20)?\d{2}|Q[1-4]\s*['’]\d{2}|(?:first|second|third|fourth)[-\s]quarter(?:\s+of)?(?:\s+fiscal)?\s+(?:FY\s*)?20\d{2})\b/gi;
+const ORDINAL_QUARTER: Record<string, number> = { FIRST: 1, SECOND: 2, THIRD: 3, FOURTH: 4 };
 export function normalizePeriod(text: string): string | null {
-  const value = text.trim().toUpperCase().replace(/FISCAL YEAR|YEAR/g, 'FY').replace(/\s+/g, '');
+  const upper = text.trim().toUpperCase();
+  const apostrophe = /^Q([1-4])\s*['’]\s*(\d{2})$/.exec(upper);
+  if (apostrophe) return `20${apostrophe[2]}-Q${apostrophe[1]}`;
+  const spaced = upper.replace(/[-\s]+/g, ' ');
+  const ordinal = /^(FIRST|SECOND|THIRD|FOURTH) QUARTER(?: OF)?(?: FISCAL)?(?: FY)? ?(20\d{2})$/.exec(spaced);
+  if (ordinal) return `${ordinal[2]}-Q${ORDINAL_QUARTER[ordinal[1]!]}`;
+  const short = /^([1-4])Q ?['’]? ?(?:20)?(\d{2})$/.exec(spaced);
+  if (short) return `20${short[2]}-Q${short[1]}`;
+  const value = upper.replace(/FISCAL YEAR|YEAR/g, 'FY').replace(/\s+/g, '');
   if (/^20\d{2}-\d{2}-\d{2}$/.test(value)) return `ASOF:${value}`;
   if (!/^(?:(?:FY)?20\d{2}(?:[-/]?Q[1-4])?|Q[1-4][-/]?(?:FY)?20\d{2})$/.test(value)) return null;
   const year = /20\d{2}/.exec(value)?.[0];
   const quarter = /Q[1-4]/.exec(value)?.[0];
   return year ? (quarter ? `${year}-${quarter}` : `FY${year}`) : null;
+}
+// Every period spelled in a line, in reading order (table column headers rely on the order).
+export function periodsInOrder(line: string): (string | null)[] { return [...line.matchAll(periodPattern)].map(m => normalizePeriod(m[0])); }
+export function stripPeriods(line: string, replacement = ' '): string { return line.replace(periodPattern, replacement); }
+// A quarter named without a year ("in the third quarter", "Q3"), as 1-4. Null when the text names a year too.
+export function quarterOnly(text: string): number | null {
+  if (stripPeriods(text) !== text) return null;
+  const word = /\b(first|second|third|fourth)[-\s]quarter\b/i.exec(text)?.[1];
+  if (word) return ORDINAL_QUARTER[word.toUpperCase()]!;
+  const digit = /\bQ([1-4])\b|\b([1-4])Q\b/i.exec(text);
+  return digit ? Number(digit[1] ?? digit[2]) : null;
+}
+// "third quarter" plus a dated heading (2026-Q3 or FY2026) names 2026-Q3.
+export function quarterInYearOf(text: string, base: string | null): string | null {
+  const quarter = quarterOnly(text);
+  const year = /^(20\d{2})(?:-Q[1-4])?$|^FY(20\d{2})$/.exec(base ?? '');
+  return quarter && year ? `${year[1] ?? year[2]}-Q${quarter}` : null;
 }
 export function periodFromLine(line: string): string | null {
   const periods = [...line.matchAll(periodPattern)].map(m => normalizePeriod(m[0]));

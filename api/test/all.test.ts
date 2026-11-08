@@ -11,7 +11,7 @@ import { createJev, type Jev, type Transport } from '../src/jev.js';
 import { compareMoney, decimal, parseMoney } from '../src/money.js';
 import { createTranscriber } from '../src/transcribe.js';
 import { createClaude } from '../src/claude.js';
-import { createClaimExtractor } from '../src/extract.js';
+import { createClaimExtractor, signedContractsAssertion } from '../src/extract.js';
 import type { CheckResponse, Segment, SourceText } from '../src/types.js';
 
 // Block real external calls even on a developer machine with installed keys.
@@ -123,6 +123,47 @@ test('Claude: generic text uses code-selected proof and Jev; missing evidence ne
   const review = await checkClaims([source(quote)], [source('Unrelated evidence.', 'proof.txt')], neverJev, { claude: missing.claude });
   assert.equal(review.findings[0]!.decision, 'NEEDS_REVIEW');
   assert.equal(review.findings[0]!.proof_source, null);
+});
+
+test('Claude: money mislabelled as text or contract goes through the money path and never reaches Jev', async () => {
+  const dollars = 'In FY2025, revenue reached $1,250,000 across all channels.';
+  const words = 'Bookings closed the year at 1.25 million across all channels.';
+  const broken = 'Bookings closed the year at $1.2.3 across all channels.';
+  const text = [dollars, words, broken].join('\n');
+  const { claude } = claudeStub([{ claims: [{ type: 'text', quote: dollars }, { type: 'contract', quote: words }, { type: 'text', quote: broken }] },
+    ...[1, 2, 3].map(() => ({ explanation: 'The amounts were compared in code.' }))]);
+  // The proof shares words with every claim, so the generic text path would otherwise ask Jev.
+  const proof = 'FY2025\nrevenue,1175000.00\nBookings closed the year across all channels strongly.';
+  const result = await checkClaims([source(text)], [source(proof, 'proof.csv')], neverJev, { claude });
+  assertResponse(result);
+  const byQuote = (quote: string) => result.findings.find(f => f.claim_source.quote === quote)!;
+  assert.equal(byQuote(dollars).claimed_usd, '1250000.00'); assert.equal(byQuote(dollars).gap_usd, '75000.00');
+  assert.equal(byQuote(dollars).decision, 'NO');
+  assert.equal(byQuote(words).claimed_usd, '1250000.00'); assert.equal(byQuote(words).decision, 'NEEDS_REVIEW');
+  assert.equal(byQuote(broken).claimed_usd, null); assert.equal(byQuote(broken).decision, 'NEEDS_REVIEW');
+  assert.ok(result.findings.every(f => f.jev_probability === null));
+});
+
+test('Claude: signed-contracts assertion inside a full dated sentence; negation is not an assertion', async () => {
+  const quote = 'As of 2026-09-30, our CEO confirmed on the call that all material contracts are signed.';
+  const { claude } = claudeStub([{ claims: [{ type: 'contract', quote }] }, { explanation: 'The register lists CT-102 as unsigned.' }]);
+  let asked = 0;
+  const result = await checkClaims([source(quote)], [source(starterRegisterLine, 'contract-register.txt')],
+    { async ask() { asked++; return { probability: 0.99, mocked: false }; } }, { claude });
+  assertResponse(result);
+  const finding = result.findings[0]!;
+  assert.equal(finding.id, 'f-contracts'); assert.equal(finding.decision, 'NO');
+  assert.equal(finding.claim_source.quote, quote); assert.equal(finding.jev_probability, 0.99); assert.equal(asked, 1);
+  assert.match(finding.proof_source!.quote, /CT-102 unsigned/);
+  for (const negated of ['As of 2026-09-30, not all material contracts are signed.', 'Our material contracts are not signed yet.',
+    'No contracts are signed.', 'Some contracts remain unsigned, but other contracts are signed.']) {
+    assert.equal(signedContractsAssertion(negated), false, negated);
+  }
+  assert.equal(signedContractsAssertion('We can confirm all of our material contracts have been signed.'), true);
+  const negatedQuote = 'As of 2026-09-30, not all material contracts are signed.';
+  const negatedRun = claudeStub([{ claims: [{ type: 'contract', quote: negatedQuote }] }]);
+  const negatedClaims = (await createClaimExtractor(negatedRun.claude, () => {})(source(negatedQuote))).claims;
+  assert.equal(negatedClaims[0]!.metric, 'contract');
 });
 
 test('Claude: metadata cannot invent money; omitted suffixes are parsed from the source', async () => {

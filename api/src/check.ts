@@ -1,5 +1,5 @@
 import { contractRows, extractClaims, isMetric, sameContractPeriod, samePeriod } from './extract.js';
-import { abs, compareMoney, decimal } from './money.js';
+import { abs, compareMoney, containsMoney, decimal } from './money.js';
 import { validProbability, type Jev } from './jev.js';
 import type { CheckResponse, Claim, Decision, Finding, SourceText } from './types.js';
 import { createClaude, explainFinding, type Claude } from './claude.js';
@@ -149,7 +149,8 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
         }
       }
     }
-    if (claim.metric === 'text' || claim.metric === 'contract') {
+    // Second guard: a quote with a dollar amount never goes to Jev as text.
+    if ((claim.metric === 'text' || claim.metric === 'contract') && !containsMoney(claim.quote)) {
       const passage = textEvidence(claim, proofSources);
       if (passage) {
         finding.proof_source = { name: passage.source.name, quote: passage.quote, url: null };

@@ -6,6 +6,9 @@ const scales: Record<string, bigint> = {
   b: 1000000000n, billion: 1000000000n, billions: 1000000000n,
 };
 export const AMOUNT_PATTERN = String.raw`(?:USD\s*|\$\s*)?[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*(?:billions?|millions?|thousands?|[KMB])\b)?(?:\s*\(in\s+(?:thousands|millions|billions)\))?`;
+// Independent of any model label: a dollar sign, USD/dollars, or a scaled number marks money.
+const MONEY_HINT = /(?:\$|\bUSD\b|\bUS\s*dollars?\b)\s*[+-]?\d|\d(?:[\d,]*\d)?(?:\.\d+)?\s*(?:thousand|million|billion|[KMB])\b|\d\s*(?:USD|(?:US\s+)?dollars?)\b/i;
+export function containsMoney(text: string): boolean { return MONEY_HINT.test(text); }
 export function unitFromText(text: string): bigint | null {
   const match = /\bin\s+(thousands|millions|billions)\b/i.exec(text);
   return match ? scales[match[1]!.toLowerCase()]! : null;

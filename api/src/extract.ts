@@ -1,4 +1,4 @@
-import { AMOUNT_PATTERN, parseMoney, unitFromText } from './money.js';
+import { AMOUNT_PATTERN, containsMoney, parseMoney, unitFromText } from './money.js';
 import type { Claim, Metric, SourceText } from './types.js';
 import { z } from 'zod';
 import type { Claude } from './claude.js';
@@ -21,7 +21,12 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
     const claims: Claim[] = [];
     const offsets = new Map<string, number>();
     let dropped = 0;
-    for (const item of result.claims) {
+    for (const labelled of result.claims) {
+      // Code, not Claude's label, decides whether a quote is money. Money never reaches Jev as text.
+      const item: typeof labelled = labelled.type !== 'money' && containsMoney(labelled.quote)
+        ? { type: 'money', quote: labelled.quote, unit: '', period: '', amount: /[+-]?\d[\d,]*(?:\.\d+)?/.exec([...labelled.quote
+          .matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))].find(match => containsMoney(match[0]))?.[0] ?? '')?.[0] ?? '' }
+        : labelled;
       const offset = source.text.indexOf(item.quote, offsets.get(item.quote) ?? 0);
       if (offset < 0) { dropped++; continue; }
       offsets.set(item.quote, offset + item.quote.length);
@@ -61,7 +66,7 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
         } catch { }
         if (!grounded) claim.period = 'AMBIGUOUS';
       } else if (item.type === 'contract') {
-        if (/^\s*(?:all\s+)?(?:material\s+)?contracts\s+are\s+signed[.!]?\s*$/i.test(item.quote)) claim.metric = 'contracts';
+        if (signedContractsAssertion(item.quote)) claim.metric = 'contracts';
       }
       claims.push(claim);
     }
@@ -70,6 +75,15 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
   };
 }
 
+// True when a quote, possibly a full sentence, affirms that all (material) contracts are signed.
+// Negated forms ("not all contracts are signed", "contracts are not signed") are not affirmations.
+export function signedContractsAssertion(quote: string): boolean {
+  const pattern = /\b(?:all\s+)?(?:(?:of\s+)?(?:our|the)\s+)?(?:material\s+)?contracts\s+(?:are|have\s+been|were)\s+(?:all\s+|now\s+|fully\s+)?signed\b/gi;
+  return [...quote.matchAll(pattern)].some(match => {
+    const before = quote.slice(0, match.index);
+    return !/\b(?:not|no|never|none|n't|nor)\s*$/i.test(before) && !/\b(?:not|never|un)\s*signed\b/i.test(match[0]);
+  }) && !/\bcontracts\s+(?:are|have|were)\s*(?:not|n't|never|been\s+not)\b|\bnot\s+(?:all|every)\b[^.]*\bcontracts?\b|\b(?:not|no)\s+(?:yet\s+)?(?:material\s+)?contracts?\b|\bunsigned\b/i.test(quote);
+}
 const periodPattern = /\b(?:Q[1-4]\s*[-/]?\s*(?:FY\s*)?20\d{2}|(?:FY\s*)?20\d{2}\s*[-/]?\s*Q[1-4]|20\d{2}-\d{2}-\d{2}|(?:FY\s*|fiscal year\s*|year\s+)20\d{2})\b/gi;
 export function normalizePeriod(text: string): string | null {
   const value = text.trim().toUpperCase().replace(/FISCAL YEAR|YEAR/g, 'FY').replace(/\s+/g, '');

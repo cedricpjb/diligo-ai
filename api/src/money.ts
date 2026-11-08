@@ -13,8 +13,11 @@ export const AMOUNT_PATTERN = String.raw`(?:USD\s*|\$\s*)?[+-]?(?:\d{1,3}(?:,\d{
 const MONEY_HINT = /(?:\$|\bUSD\b|\bUS\s*dollars?\b)\s*[+-]?\d|\d(?:[\d,]*\d)?(?:\.\d+)?\s*(?:thousand|million|billion|trillion|bn|mm|tn|[KMB])\b|\d\s*(?:USD|(?:US\s+)?dollars?)\b/i;
 export function containsMoney(text: string): boolean { return MONEY_HINT.test(text); }
 export function unitFromText(text: string): bigint | null {
+  // "in millions", "millions of dollars", and the table-heading form "($ millions, except per share data)".
   const match = /\bin\s+(thousands|millions|billions|trillions)\b/i.exec(text)
-    ?? /\b(thousands|millions|billions|trillions)\s+of\s+(?:US\s+)?dollars\b/i.exec(text);
+    ?? /\b(thousands|millions|billions|trillions)\s+of\s+(?:US\s+)?dollars\b/i.exec(text)
+    ?? /^\(?\s*(?:US\s*)?\$\s*(thousands|millions|billions|trillions)\b/i.exec(text)
+    ?? /\b(?:USD|US\$)\s+(thousands|millions|billions|trillions)\b/i.exec(text);
   return match ? scales[match[1]!.toLowerCase()]! : null;
 }
 // A word that looks like a scale ("tril", "crore", "T") but is not one parseMoney understands. The amount before it
@@ -56,4 +59,13 @@ export function compareMoney(claim: Money, proof: Money) {
     claimed_usd: decimal(claim.cents), proof_usd: decimal(proof.cents),
     gap_usd: decimal(gap), gap_pct: percentage === null ? null : decimal(percentage),
   };
+}
+
+// 'USD' only when the amount itself ($, US$, USD) or a USD heading says so. A foreign symbol or code, a mix of both,
+// or no marker at all is never USD: such an amount must not be compared with a USD claim.
+export type Currency = 'USD' | 'other' | 'unknown';
+export const OTHER_CURRENCY = /[€£¥₹]|\b(?:EUR|GBP|JPY|CNY|RMB|CAD|AUD|CHF|INR|NZD|HKD|SGD|euros?|pounds?|yen|yuan|francs?)\b|\b(?:C|A|HK|NZ|S)\$/i;
+export function currencyOf(text: string): Currency {
+  if (OTHER_CURRENCY.test(text)) return 'other';
+  return /\$|\bUSD\b|\bU\.?S\.?\s+dollars?\b|\b(?:of|in)\s+dollars\b/i.test(text) ? 'USD' : 'unknown';
 }

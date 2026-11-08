@@ -1,8 +1,8 @@
 import { contractRows, extractClaims, isMetric, sameContractPeriod, samePeriod } from './extract.js';
 import { abs, compareMoney, containsMoney, decimal, roundTo } from './money.js';
-import { amountContext, comparePercent, currencyOf, hasScaledAmount, filingFigures, forwardLooking, percentClaim } from './filing.js';
+import { amountContext, comparePercent, currencyOf, hasScaledAmount, filingFigures, forwardLooking, percentClaim, scopeFigures, withoutSections, basisOf, type Figure } from './filing.js';
 import { validProbability, type Jev } from './jev.js';
-import type { CheckResponse, Claim, Decision, Finding, SourceText } from './types.js';
+import type { CheckResponse, Claim, Decision, Finding, Money, SourceText } from './types.js';
 import { createClaude, explainFinding, type Claude } from './claude.js';
 import { createClaimExtractor, type ClaimExtractor } from './extract.js';
 
@@ -42,6 +42,8 @@ const UNMATCHED = 'The proof does not address this claim: no passage in it match
 const UNPARSED_SCALE = 'The amount has a scale word that could not be parsed, so no amount is shown.';
 const NOT_USD = 'The proof has an amount for this metric and period, but it is not clearly in US dollars (a non-USD currency, or no currency marker), so it was not compared with the USD claim.';
 const UNCLEAR_UNIT = 'The proof row for this metric has a unit that cannot be told (it is not clearly dollars in the table scale), so it was not compared.';
+const CHANGE_CLAIM = 'This claim states a change (up or down, year-on-year), not a level. A change is not compared with a reported level, so it needs review.';
+const OTHER_SECTION = 'The claimed amount matches this metric in a different section of the proof (for example a segment), and the claim does not say which section it means, so it needs review.';
 const UNREADABLE_AMOUNT = 'The amount could not be read safely as US dollars, so it needs review.';
 // A passage is relevant only when it shares the claim's metric, an entity or a number, not merely a couple of common words.
 function textEvidence(claim: Claim, sources: SourceText[]): { source: SourceText; quote: string } | null {
@@ -129,15 +131,20 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
       lock(UNPARSED_SCALE);
     } else if (isMetric(claim.metric) || claim.metric === 'other-money') {
       const context = claim.amountIndex === undefined ? null : amountContext(claim.quote, claim.amountIndex);
-      const key = isMetric(claim.metric) ? claim.metric : context?.key ?? null;
+      const key = isMetric(claim.metric) ? claim.metric : context?.key ? withoutSections(context.key, figures) || null : null;
       if (!claim.money) lock(UNREADABLE_AMOUNT);
       else if (claim.period === 'AMBIGUOUS') lock('The claim period could not be determined unambiguously, so it needs review.');
+      else if (context?.change) lock(CHANGE_CLAIM);
       else {
-        const usable = !key || context?.change ? false : true;
+        const usable = key !== null;
+        // "Net revenue - managed" and "- reported" are one metric on two bases: a claim that names a basis uses it.
+        const basis = /\bmanaged\b/i.test(claim.quote) ? 'managed' : /\breported\b/i.test(claim.quote) ? 'reported' : null;
+        const scope = scopeFigures(figures, claim.quote);
         const direct = usable && isMetric(claim.metric)
           ? evidence.filter(e => e.metric === claim.metric && e.money && samePeriod(e.period, claim.period)) : [];
         const directQuotes = new Set(direct.map(e => `${e.source.name}\0${e.quote}`));
-        const found = usable ? figures.filter(f => f.money && f.key === key && samePeriod(f.period, claim.period)
+        const sameMetric = (f: Figure) => f.money !== null && f.key === key && samePeriod(f.period, claim.period);
+        const found = usable ? scope.filter(f => sameMetric(f) && (!basis || !f.basis || f.basis === basis)
           && !directQuotes.has(`${f.source.name}\0${f.quote}`)) : [];
         // A proof amount is compared with a USD claim only when it is clearly USD and its unit is clear.
         // Plain records (CSV, "Revenue USD 100") keep their long-standing meaning. A scaled amount with no marker anywhere
@@ -149,24 +156,41 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
         if (foreign) { lock(NOT_USD); ranked.push({ finding, claim }); continue; }
         if (unclear) { lock(UNCLEAR_UNIT); ranked.push({ finding, claim }); continue; }
         const candidates = [
-          ...direct.map(e => ({ money: e.money!, quote: e.quote, source: e.source })),
-          ...found.map(f => ({ money: f.money!, quote: f.quote, source: f.source })),
+          // A basis word right before the match ("Reported revenue of $50.2 billion") or inside it labels the inline figure.
+          ...direct.map(e => ({ money: e.money!, quote: e.quote, source: e.source,
+            basis: basisOf(e.source.text.slice(Math.max(0, e.source.text.indexOf(e.quote) - 14), e.source.text.indexOf(e.quote) + e.quote.length)) })),
+          ...found.map(f => ({ money: f.money!, quote: f.quote, source: f.source, basis: f.basis })),
         ];
         // Most precise figure first. A rounded headline ("$14.4 billion") agrees with an exact table cell (14,393 million)
         // when the exact figure rounds to it; anything else is a genuine conflict.
         candidates.sort((a, b) => a.money.quantum < b.money.quantum ? -1 : a.money.quantum > b.money.quantum ? 1 : 0);
+        const agrees = (c: { money: Money }) => roundTo(c.money.cents, claim.money!.quantum) === claim.money!.cents;
+        const conflict = candidates.some(e => roundTo(candidates[0]!.money.cents, e.money.quantum) !== e.money.cents);
+        // Reported vs managed figures may differ by design: the claim is settled only if it equals one of them.
+        const bases = new Set(candidates.map(c => c.basis).filter(basis => basis !== null));
+        // Every figure that does not equal the claim must be labelled with its basis; an unlabelled disagreement stays a conflict.
+        const byBasis = conflict && bases.size > 1 && candidates.filter(c => !agrees(c)).every(c => c.basis !== null);
+        const matching = candidates.filter(agrees);
+        const settled = byBasis && matching.every(c => roundTo(matching[0]!.money.cents, c.money.quantum) === c.money.cents) ? matching : [];
         if (!candidates.length) lock(UNMATCHED);
-        else if (candidates.some(e => roundTo(candidates[0]!.money.cents, e.money.quantum) !== e.money.cents))
-          review(finding, 'Matching proof documents contain conflicting amounts.');
+        else if (conflict && !settled.length) review(finding, byBasis
+          ? 'The proof gives different reported and managed amounts for this metric and the claim equals neither, so it needs review.'
+          : 'Matching proof documents contain conflicting amounts.');
         else {
-          const proof = candidates[0]!;
-          finding.mocked ||= proof.source.mocked;
-          const { matches: supported, ...amounts } = compareMoney(claim.money, proof.money);
-          Object.assign(finding, amounts);
-          finding.proof_source = { name: proof.source.name, quote: proof.quote, url: null };
-          setDecision(finding, supported ? 'YES' : 'NO');
-          finding.explanation = supported ? 'The proof amount matches the claim at its stated precision.' : 'The proof amount differs from the claim after normalizing units and periods.';
-          finding.next_action = supported ? 'No action needed for this amount.' : 'Reconcile the reported amount with the proof document.';
+          const proof = settled[0] ?? candidates[0]!;
+          const supported = agrees(proof);
+          // Same metric and period, different section, and the claim equals that one: the claim does not say which section.
+          const elsewhere = !supported && figures.some(f => !scope.includes(f) && sameMetric(f) && f.money !== null && agrees({ money: f.money }));
+          if (elsewhere) lock(OTHER_SECTION);
+          else {
+            finding.mocked ||= proof.source.mocked;
+            const { matches: _unused, ...amounts } = compareMoney(claim.money, proof.money);
+            Object.assign(finding, amounts);
+            finding.proof_source = { name: proof.source.name, quote: proof.quote, url: null };
+            setDecision(finding, supported ? 'YES' : 'NO');
+            finding.explanation = supported ? 'The proof amount matches the claim at its stated precision.' : 'The proof amount differs from the claim after normalizing units and periods.';
+            finding.next_action = supported ? 'No action needed for this amount.' : 'Reconcile the reported amount with the proof document.';
+          }
         }
       }
     } else if (claim.metric === 'contracts') {
@@ -207,8 +231,9 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
       } else if (percent) {
         // Percentages are compared in code against the same metric and period, never by Jev.
         const matches = percent.ambiguous || !percent.context.key || percent.context.change || claim.period === 'AMBIGUOUS' ? []
-          : figures.filter(f => f.percent && f.key === percent.context.key && samePeriod(f.period, claim.period));
-        if (!matches.length) lock(UNMATCHED);
+          : scopeFigures(figures, claim.quote).filter(f => f.percent && f.key === withoutSections(percent.context.key!, figures) && samePeriod(f.period, claim.period));
+        if (!percent.ambiguous && percent.context.change) lock(CHANGE_CLAIM);
+        else if (!matches.length) lock(UNMATCHED);
         else if (matches.some(f => roundTo(matches[0]!.percent!.value, f.percent!.quantum) !== f.percent!.value)) review(finding, 'Matching proof documents contain conflicting percentages.');
         else if (!percent.ambiguous) {
           const proof = matches[0]!;

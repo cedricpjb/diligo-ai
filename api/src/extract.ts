@@ -1,4 +1,4 @@
-import { AMOUNT_PATTERN, containsMoney, parseMoney, unitFromText, unparsedScaleAfter } from './money.js';
+import { AMOUNT_PATTERN, containsMoney, currencyOf, parseMoney, unitFromText, unparsedScaleAfter } from './money.js';
 import type { Claim, Metric, SourceText } from './types.js';
 import { z } from 'zod';
 import type { Claude } from './claude.js';
@@ -9,24 +9,38 @@ export const claimsSchema = z.strictObject({ claims: z.array(z.discriminatedUnio
   z.strictObject({ type: z.literal('money'), quote: quoteSchema, amount: fieldSchema.min(1), unit: fieldSchema, period: fieldSchema }),
   z.strictObject({ type: z.literal('text'), quote: quoteSchema }),
   z.strictObject({ type: z.literal('contract'), quote: quoteSchema }),
-])).max(100) });
+])).max(300) });
 export interface Extraction { claims: Claim[]; mocked: boolean }
 export type ClaimExtractor = (source: SourceText) => Promise<Extraction>;
 export function createClaimExtractor(claude: Claude, log: (note: { dropped_claims: number }) => void = console.info): ClaimExtractor {
   return async source => {
     const result = await claude.json(claimsSchema,
-      'Extract every factual claim from this pitch, memo, or transcript. Copy each quote exactly, including whitespace and punctuation, as a contiguous source substring. Use type money, text, or contract. For money, copy the stated amount, unit/currency and period as text, never normalize or compute them. Use empty strings for unstated unit or period. Include sufficient context in the quote to identify the metric, amount, currency and period. Never invent a source or citation. Do not return commentary.',
-      { text: source.text }, 4096);
+      'Extract every factual claim from this pitch, memo, or transcript. Make every claim atomic: one metric and one number per claim. Split a compound sentence into separate claims, for example "net income of $15.3 billion, EPS of $5.57, and an ROTCE of 20%" becomes three claims: "net income of $15.3 billion", "EPS of $5.57" and "ROTCE of 20%". Keep the metric name next to its number in each quote and put a change ("up 8%", "year-on-year") in its own claim. Never combine two numbers in one quote. Copy each quote exactly, including whitespace and punctuation, as a contiguous source substring. Use type money, text, or contract. For money, copy the stated amount, unit/currency and period as text, never normalize or compute them. Use empty strings for unstated unit or period. Include sufficient context in the quote to identify the metric, amount, currency and period. Never invent a source or citation. Do not return commentary.',
+      { text: source.text }, 8192);
     if (!result) return { claims: extractClaims(source), mocked: true };
     const claims: Claim[] = [];
     const offsets = new Map<string, number>();
     let dropped = 0;
-    for (const labelled of result.claims) {
+    const queue: (typeof result.claims)[number][] = [...result.claims];
+    for (let next = 0; next < queue.length; next++) {
+      const labelled = queue[next]!;
       // Code, not Claude's label, decides whether a quote is money. Money never reaches Jev as text.
       let item: typeof labelled = labelled.type !== 'money' && containsMoney(labelled.quote)
         ? { type: 'money', quote: labelled.quote, unit: '', period: '', amount: /[+-]?\d[\d,]*(?:\.\d+)?/.exec([...labelled.quote
           .matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))].find(match => containsMoney(match[0]))?.[0] ?? '')?.[0] ?? '' }
         : labelled;
+      // A level and a change in one quote ("revenue of $50.9 billion, up 8%") are two claims. Code splits what Claude
+      // left joined, using substrings of the same quote, so each part is still verified word for word below.
+      if (item.type === 'money') {
+        const numeric = /[+-]?\d[\d,]*(?:\.\d+)?/.exec(item.amount)?.[0];
+        const found = [...item.quote.matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))].filter(match => /[+-]?\d[\d,]*(?:\.\d+)?/.exec(match[0])?.[0] === numeric);
+        const cut = found.length === 1 ? changeStart(item.quote, found[0]!.index! + found[0]![0].length) : null;
+        if (cut !== null) {
+          const level = item.quote.slice(0, cut).replace(/[,;\s]+$/, '');
+          const change = item.quote.slice(cut).replace(/^[,;\s]+(?:and\s+)?/i, '').replace(/\s+$/, '');
+          if (level && change && level.includes(item.amount)) { item = { ...item, quote: level }; queue.push({ type: 'text', quote: change }); }
+        }
+      }
       const offset = source.text.indexOf(item.quote, offsets.get(item.quote) ?? 0);
       if (offset < 0) { dropped++; continue; }
       offsets.set(item.quote, offset + item.quote.length);
@@ -44,13 +58,17 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
       }
       // The last currency note above the quote decides the currency of bare numbers.
       const currencyNote = headings.flatMap(line => [...line.matchAll(/\b(USD|US\s+dollars?|EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b|(\$)|([€£¥])/gi)]).pop();
-      const currency: 'USD' | 'other' | null = !currencyNote ? null : currencyNote[2] || /^(?:USD|US)/i.test(currencyNote[1] ?? '') ? 'USD' : 'other';
+      // No note above the quote: the source as a whole decides. A $/US$/USD marker and no other currency anywhere is USD.
+      const whole = currencyOf(source.text);
+      const currency: 'USD' | 'other' | null = whole === 'other' ? 'other' : !currencyNote ? (whole === 'USD' ? 'USD' : null) : currencyNote[2] || /^(?:USD|US)/i.test(currencyNote[1] ?? '') ? 'USD' : 'other';
       // A bare number in a money sentence (no $ or USD) is money whatever Claude labelled it; its currency comes from context.
       let bare = false;
       if (item.type !== 'money') {
         const amount = bareMoneyAmount(item.quote);
         if (amount !== null) { item = { type: 'money', quote: item.quote, amount, unit: '', period: '' }; bare = true; }
       }
+      // An amount with no $/USD marker of its own takes its currency from context, like any bare number.
+      if (item.type === 'money' && currencyOf(item.quote) !== 'USD') bare = true;
       // The whole source line holds the claim's context too: "Target 1, 2026 Q3. Cash USD 480,000." dates the
       // amount even when Claude quoted only the amount. An unambiguous period on the line beats an inherited one.
       const lineStart = source.text.lastIndexOf('\n', offset - 1) + 1;
@@ -77,7 +95,7 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
         claim.period = claim.period && statedPeriod !== claim.period ? 'AMBIGUOUS' : statedPeriod;
         const grounded = item.quote.includes(item.amount) && (!item.unit || item.unit.split(/\s+/).every(word => context.includes(word)))
           && (!item.period || context.includes(item.period));
-        const unit = /^(?:(?:USD|US dollars?|dollars?|\$)\s*)?(?:(?:in\s+)?(trillions?|billions?|millions?|thousands?|bn|mm|tn|[KMB]))?(?:\s*(?:USD|US dollars?|dollars?))?$/i.exec(item.unit.trim());
+        const unit = /^(?:in\s+)?(trillions?|billions?|millions?|thousands?|bn|mm|tn|[KMB])?$/i.exec(item.unit.replace(/\b(?:USD|US|U\.S\.|dollars?|of)\b|\$/gi, ' ').replace(/\s+/g, ' ').trim());
         const numericText = /[+-]?\d[\d,]*(?:\.\d+)?/.exec(item.amount)?.[0];
         const amounts = [...item.quote.matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))]
           .filter(match => /[+-]?\d[\d,]*(?:\.\d+)?/.exec(match[0])?.[0] === numericText
@@ -107,6 +125,11 @@ export function createClaimExtractor(claude: Claude, log: (note: { dropped_claim
   };
 }
 
+// Where a change statement starts after the amount: "..., up 8% year-on-year". Null when the quote has none.
+export function changeStart(quote: string, amountEnd: number): number | null {
+  const found = /(?:,\s*|\s+)(?:and\s+)?(?:(?:was|were|is|are)\s+)?(?:up|down|higher|lower|increased|decreased|rose|fell|grew)\b/i.exec(quote.slice(amountEnd));
+  return found ? amountEnd + found.index : null;
+}
 // A bare number (no $ or USD) in a sentence about money, ignoring years, dates, quarters, percentages and counted nouns.
 const MONEY_WORDS = /\b(?:revenue|sales|cash|debt|bookings|arr|mrr|income|profit|burn|funding|raised|expenses?|costs?)\b/i;
 // Returns null when the quote is not a money sentence, '' when it is but the amount cannot be parsed safely
@@ -213,6 +236,8 @@ export function extractClaims(source: SourceText): Claim[] {
     const lineScale = unitFromText(line);
     if (/^(?:currency\s*:\s*)?(?:USD|EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b/i.test(line) && !/\b(revenue|cash|debt)\b/i.test(line))
       usd = /\bUSD\b/i.test(line);
+    // Any heading that names a currency ("($ in millions)", "(€ in millions)") sets it for the lines below.
+    else if (!/\b(revenue|cash|debt)\b/i.test(line) && !/\d{3}/.test(stripPeriods(line)) && currencyOf(line) !== 'unknown') usd = currencyOf(line) === 'USD';
     const columns = record(line);
     if (columns && /^(revenue|cash|debt)$/i.test(columns[0]!)) {
       const csvPeriod = columns[2] ? normalizePeriod(columns[2]) ?? 'AMBIGUOUS' : linePeriod ?? period;

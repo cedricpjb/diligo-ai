@@ -83,6 +83,42 @@ export async function checkClaims(request: CheckRequest): Promise<CheckResponse>
   return body
 }
 
+export interface Clip {
+  /** An object URL for the audio. The caller must revoke it with URL.revokeObjectURL. */
+  url: string
+  /** "whole-file": the backend sent the whole recording, so the player must seek and stop itself. */
+  mode: "segment" | "whole-file"
+}
+
+/** GET /api/clip for one audio finding (docs/API.md). Throws ApiError when it is not available. */
+export async function fetchClip(
+  audioFileId: string,
+  startMs: number,
+  endMs: number,
+  signal?: AbortSignal
+): Promise<Clip> {
+  if (isSampleMode) throw new ApiError("No API URL is set, so there is no audio to play.")
+
+  const query = new URLSearchParams({
+    file: audioFileId,
+    start_ms: String(startMs),
+    end_ms: String(endMs),
+  })
+
+  let response: Response
+  try {
+    response = await fetch(`${API_URL}/api/clip?${query}`, { signal })
+  } catch (error) {
+    if (isAbort(error)) throw error
+    throw new ApiError("Could not reach the Diligo.ai server.")
+  }
+  if (!response.ok) throw new ApiError("The audio clip is not available.", response.status)
+
+  const mode = response.headers.get("X-Clip-Mode") === "whole-file" ? "whole-file" : "segment"
+  const blob = await response.blob()
+  return { url: URL.createObjectURL(blob), mode }
+}
+
 export function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError"
 }

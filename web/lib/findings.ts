@@ -137,6 +137,13 @@ export function formatTimeRange(start: number | null, end: number | null): strin
     : `${formatTimestamp(start)} – ${formatTimestamp(end)}`
 }
 
+/** Milliseconds as m:ss, rounded outward (start down, end up) so the range covers the quote. */
+export function formatClipRange(startMs: number, endMs: number): string {
+  const clock = (seconds: number) =>
+    `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`
+  return `${clock(Math.floor(startMs / 1000))} to ${clock(Math.ceil(endMs / 1000))}`
+}
+
 /** Jev's probability as a whole percent. This is a probability, not money. */
 export function formatProbability(probability: number | null): string | null {
   if (probability === null || Number.isNaN(probability)) return null

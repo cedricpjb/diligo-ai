@@ -1,8 +1,15 @@
 "use client"
 
+import { useState } from "react"
 import { ChevronRight, Flag, Check } from "lucide-react"
 
-import { formatProbability, PRIORITY_LABEL, type ReviewState } from "@/lib/findings"
+import {
+  formatProbability,
+  hasNoProof,
+  MANY_FINDINGS,
+  PRIORITY_LABEL,
+  type ReviewState,
+} from "@/lib/findings"
 import { formatPct, formatUsd } from "@/lib/money"
 import type { Finding } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -24,7 +31,23 @@ interface FindingsTableProps {
 
 const NO_VALUE = "—"
 
-export function FindingsTable({ findings, reviews, onOpen }: FindingsTableProps) {
+type Filter = "all" | "NO" | "YES" | "NEEDS_REVIEW"
+
+const FILTERS: { id: Filter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "NO", label: "NO" },
+  { id: "YES", label: "YES" },
+  { id: "NEEDS_REVIEW", label: "Needs review" },
+]
+
+export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableProps) {
+  const [filter, setFilter] = useState<Filter>("all")
+  const showFilters = all.length >= MANY_FINDINGS
+  const active = showFilters ? filter : "all"
+  const findings = active === "all" ? all : all.filter((f) => f.decision === active)
+  const countFor = (id: Filter) =>
+    id === "all" ? all.length : all.filter((f) => f.decision === id).length
+
   return (
     <section aria-labelledby="findings-title" className="flex flex-col gap-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
@@ -35,6 +58,28 @@ export function FindingsTable({ findings, reviews, onOpen }: FindingsTableProps)
           Sorted by priority, then by size of the gap. Select a finding to see the evidence.
         </p>
       </div>
+
+      {showFilters && (
+        <div role="group" aria-label="Filter findings" className="flex flex-wrap gap-2">
+          {FILTERS.map(({ id, label }) => (
+            <button
+              key={id}
+              type="button"
+              aria-pressed={active === id}
+              onClick={() => setFilter(id)}
+              className={cn(
+                "inline-flex h-9 items-center gap-2 rounded-full border px-3.5 text-sm font-medium transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                active === id
+                  ? "border-foreground/40 bg-white/[0.08] text-foreground"
+                  : "border-border text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {label}
+              <span className="text-xs tabular-nums">{countFor(id)}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Wide screens (with the sidebar open, 1280px and up): a table. */}
       <div className="hidden overflow-hidden rounded-2xl border border-border bg-card shadow-card xl:block">
@@ -88,7 +133,7 @@ export function FindingsTable({ findings, reviews, onOpen }: FindingsTableProps)
                     <Amount value={formatUsd(finding.claimed_usd)} />
                   </TableCell>
                   <TableCell className="py-3.5 text-right tabular-nums">
-                    <Amount value={formatUsd(finding.proof_usd)} />
+                    {hasNoProof(finding) ? <NoProof /> : <Amount value={formatUsd(finding.proof_usd)} />}
                   </TableCell>
                   <TableCell className="py-3.5 text-right tabular-nums">
                     {gap ? (
@@ -141,7 +186,11 @@ export function FindingsTable({ findings, reviews, onOpen }: FindingsTableProps)
                 </span>
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
                   <Stat label="Claimed" value={formatUsd(finding.claimed_usd)} />
-                  <Stat label="Proof" value={formatUsd(finding.proof_usd)} />
+                  <Stat
+                    label="Proof"
+                    value={formatUsd(finding.proof_usd)}
+                    empty={hasNoProof(finding) ? <NoProof /> : undefined}
+                  />
                   <Stat label="Gap" value={gap} sub={pct} />
                   <Stat label="Jev probability" value={jev} />
                 </dl>
@@ -166,12 +215,26 @@ function Amount({ value }: { value: string | null }) {
   )
 }
 
-function Stat({ label, value, sub }: { label: string; value: string | null; sub?: string | null }) {
+function NoProof() {
+  return <span className="text-xs text-muted-foreground">No matching proof found</span>
+}
+
+function Stat({
+  label,
+  value,
+  sub,
+  empty,
+}: {
+  label: string
+  value: string | null
+  sub?: string | null
+  empty?: React.ReactNode
+}) {
   return (
     <div>
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="mt-0.5 tabular-nums">
-        <Amount value={value} />
+        {empty && !value ? empty : <Amount value={value} />}
         {sub && <span className="ml-2 text-xs text-muted-foreground">{sub}</span>}
       </dd>
     </div>

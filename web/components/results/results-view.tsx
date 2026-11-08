@@ -5,7 +5,14 @@ import Link from "next/link"
 import { AlertCircle, Download, Info, Loader2, X } from "lucide-react"
 
 import { exportFindingsToExcel } from "@/lib/export"
-import { sortFindings, sourceUsage, summarize, type ReviewState } from "@/lib/findings"
+import {
+  knownText,
+  MANY_FINDINGS,
+  sortFindings,
+  sourceUsage,
+  summarize,
+  type ReviewState,
+} from "@/lib/findings"
 import type { StoredInvestigation } from "@/lib/investigation-store"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -72,15 +79,15 @@ function Results({
       <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <p className="text-sm text-muted-foreground">
-            {response.company} · {response.period}
+            {[knownText(response.company), knownText(response.period)].filter(Boolean).join(" · ")}
             {investigation.ticker && (
               <span className="ml-2 rounded-md border border-border px-1.5 py-0.5 font-mono text-xs text-foreground">
                 {investigation.ticker}
               </span>
             )}
           </p>
-          <h1 className="mt-1.5 text-[28px] leading-[1.15] font-semibold tracking-tight text-balance sm:text-4xl">
-            {investigation.dealName}
+          <h1 className="mt-1.5 text-[28px] leading-[1.15] font-semibold tracking-tight [overflow-wrap:anywhere] text-balance sm:text-4xl">
+            {investigation.dealName.trim() || "Investigation"}
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">
             {response.findings.length} {response.findings.length === 1 ? "claim" : "claims"} checked
@@ -154,7 +161,7 @@ function Results({
         </div>
       )}
 
-      <SummaryRow summary={summary} />
+      <SummaryRow summary={summary} reviewFirst={findings.length >= MANY_FINDINGS} />
       <FindingsTable findings={findings} reviews={reviews} onOpen={openFinding} />
       <SourcesPanel usage={usage} />
 

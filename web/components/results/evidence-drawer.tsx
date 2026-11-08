@@ -22,6 +22,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet"
+import { ClipPlayer } from "./clip-player"
 import { DecisionBadge, MockedBadge } from "./decision-badge"
 
 interface EvidenceDrawerProps {
@@ -181,6 +182,7 @@ function ClaimSection({ finding }: { finding: Finding }) {
           </span>
         )}
       </Meta>
+      <ClipPlayer key={finding.id} finding={finding} />
     </Section>
   )
 }

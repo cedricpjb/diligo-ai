@@ -37,6 +37,11 @@ export interface Finding {
   priority: Priority
   next_action: string
   mocked: boolean
+  /** Audio findings only. Whole milliseconds into the recording. Absent or null on text findings. */
+  start_ms?: number | null
+  end_ms?: number | null
+  /** Issued by the backend for GET /api/clip. Absent when the recording was not kept. */
+  audio_file_id?: string | null
 }
 
 export interface Source {

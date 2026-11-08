@@ -21,6 +21,8 @@ import { saveInvestigation } from "@/lib/investigation-store"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { recordingFileName } from "@/lib/recording"
+import { CallRecorder } from "./call-recorder"
 import { FileDropzone } from "./file-dropzone"
 import { ProcessingPanel, type ProcessingStep } from "./processing-panel"
 
@@ -46,6 +48,11 @@ export function NewInvestigationForm() {
   const [proofRejected, setProofRejected] = useState<Rejection[]>([])
   const [errors, setErrors] = useState<FieldErrors>({})
   const [phase, setPhase] = useState<Phase>({ kind: "idle" })
+  // The recording made in the browser, if there is one. It is an ordinary item in `claims`, found by id.
+  const [recordingId, setRecordingId] = useState<string | null>(null)
+  const recording = claims.find((item) => item.id === recordingId) ?? null
+  // True while the microphone is being used. Analysis waits until the recording has stopped and been added.
+  const [recordingActive, setRecordingActive] = useState(false)
 
   const abortRef = useRef<AbortController | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -90,6 +97,32 @@ export function NewInvestigationForm() {
     if (accepted.length > 0) setErrors((prev) => ({ ...prev, [zone]: undefined, request: undefined }))
   }
 
+  /**
+   * Adds a finished recording to the claims list, replacing the previous recording. The new file goes through the
+   * same rules as an upload. The old recording is removed only when the new one is accepted.
+   */
+  function addRecording(file: File): string | null {
+    const others = claims.filter((item) => item.id !== recordingId)
+    const existing = [...others, ...proof]
+    const name = recordingFileName(
+      existing.map((item) => item.file.name),
+      file.name.endsWith(".m4a") ? "m4a" : "wav"
+    )
+    const { accepted, rejected } = screenFiles([new File([file], name, { type: file.type })], existing, CLAIMS_RULES)
+    if (rejected.length > 0) return rejected[0]!.reason
+    const item = accepted[0]!
+    setClaims([...others, item])
+    setRecordingId(item.id)
+    setErrors((prev) => ({ ...prev, claims: undefined, request: undefined }))
+    return null
+  }
+
+  function removeRecording() {
+    setClaims((prev) => prev.filter((item) => item.id !== recordingId))
+    setRecordingId(null)
+    setErrors((prev) => ({ ...prev, request: undefined }))
+  }
+
   function removeFile(zone: "claims" | "proof", id: string) {
     const drop = (items: UploadItem[]) => items.filter((item) => item.id !== id)
     if (zone === "claims") setClaims(drop)
@@ -117,6 +150,11 @@ export function NewInvestigationForm() {
   }
 
   async function analyze() {
+    if (recordingActive) {
+      setErrors({ request: "Stop the recording before you analyze, so it is included." })
+      requestErrorRef.current?.focus()
+      return
+    }
     const found = validate()
     setErrors(found)
     if (Object.keys(found).length > 0) {
@@ -260,19 +298,28 @@ export function NewInvestigationForm() {
         </section>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <FileDropzone
-            step="02"
-            title="What they said"
-            description="Call recordings, transcripts or the management deck."
-            rules={CLAIMS_RULES}
-            items={claims}
-            rejections={claimsRejected}
-            error={errors.claims}
-            disabled={busy}
-            onAdd={(files) => addFiles("claims", files)}
-            onRemove={(id) => removeFile("claims", id)}
-            onDismissRejections={() => setClaimsRejected([])}
-          />
+          <div className="flex min-w-0 flex-col gap-5">
+            <FileDropzone
+              step="02"
+              title="What they said"
+              description="Call recordings, transcripts or the management deck."
+              rules={CLAIMS_RULES}
+              items={claims}
+              rejections={claimsRejected}
+              error={errors.claims}
+              disabled={busy}
+              onAdd={(files) => addFiles("claims", files)}
+              onRemove={(id) => removeFile("claims", id)}
+              onDismissRejections={() => setClaimsRejected([])}
+            />
+            <CallRecorder
+              recording={recording}
+              disabled={busy}
+              onRecorded={addRecording}
+              onRemove={removeRecording}
+              onActiveChange={setRecordingActive}
+            />
+          </div>
           <FileDropzone
             step="03"
             title="The proof"
@@ -330,6 +377,7 @@ export function NewInvestigationForm() {
               </p>
               <Button
                 type="submit"
+                disabled={recordingActive}
                 className="h-11 gap-2 rounded-lg px-6 text-[15px] font-semibold transition-[background-color,transform] duration-150 hover:-translate-y-px hover:bg-[#fb8a3c] active:translate-y-px active:scale-[0.985]"
               >
                 {phase.kind === "failed" ? "Analyze again" : "Analyze"}

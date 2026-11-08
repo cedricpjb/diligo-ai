@@ -11,7 +11,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node scripts/test-known-text.mjs",
+    "test": "node scripts/test-known-text.mjs && node scripts/test-recording.mjs",
     "typecheck": "node scripts/sync-mock.mjs && tsc --noEmit"
   },
   "dependencies": {

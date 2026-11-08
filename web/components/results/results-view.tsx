@@ -96,10 +96,10 @@ function Results({
           </p>
         </div>
         <Button
-          variant="outline"
+          variant="default"
           onClick={exportToExcel}
           disabled={exportState.status === "working"}
-          className="h-11 shrink-0 gap-2 self-start px-4 sm:h-10"
+          className="h-11 shrink-0 gap-2 self-start px-4 font-semibold sm:h-10"
         >
           {exportState.status === "working" ? (
             <Loader2 className="animate-spin" aria-hidden />

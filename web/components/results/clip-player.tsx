@@ -69,7 +69,7 @@ export function ClipPlayer({ finding }: { finding: Finding }) {
           variant="outline"
           onClick={play}
           disabled={state.status === "loading"}
-          className="h-11 gap-2 sm:h-9"
+          className="h-11 gap-2 border-brand/40 hover:border-brand/70 hover:bg-brand/[0.08] focus-visible:ring-offset-2 focus-visible:ring-offset-card"
         >
           {state.status === "loading" ? (
             <Loader2 className="animate-spin" aria-hidden />

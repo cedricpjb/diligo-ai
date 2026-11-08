@@ -114,7 +114,7 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
                 <TableRow
                   key={finding.id}
                   onClick={() => onOpen(finding.id)}
-                  className="h-16 cursor-pointer has-focus-visible:bg-muted"
+                  className="h-16 cursor-pointer has-focus-visible:bg-muted has-focus-visible:ring-1 has-focus-visible:ring-ring has-focus-visible:ring-inset"
                 >
                   <TableCell className="max-w-0 min-w-64 py-0 pl-5 whitespace-normal">
                     <button
@@ -146,7 +146,7 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
                   <TableCell className="py-0 text-right tabular-nums">
                     {gap ? (
                       <>
-                        <span className="block text-foreground">{gap}</span>
+                        <span className="block font-semibold text-foreground">{gap}</span>
                         {pct && <span className="block text-xs text-muted-foreground">{pct}</span>}
                       </>
                     ) : (

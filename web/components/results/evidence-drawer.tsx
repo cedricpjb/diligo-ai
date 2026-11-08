@@ -1,6 +1,16 @@
 "use client"
 
-import { Check, ExternalLink, Flag, FlaskConical, X } from "lucide-react"
+import {
+  Check,
+  Clock,
+  ExternalLink,
+  FileText,
+  Flag,
+  FlaskConical,
+  type LucideIcon,
+  User,
+  X,
+} from "lucide-react"
 
 import {
   formatProbability,
@@ -142,7 +152,8 @@ function Section({
 }) {
   return (
     <section className={cn("flex flex-col gap-2.5", className)}>
-      <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+      <h3 className="flex items-center gap-2 text-xs font-semibold tracking-wide text-foreground uppercase">
+        <span aria-hidden className="h-3 w-0.5 rounded-full bg-brand" />
         {title}
       </h3>
       {children}
@@ -160,9 +171,27 @@ function Quote({ children }: { children: React.ReactNode }) {
 
 function Meta({ children }: { children: React.ReactNode }) {
   return (
-    <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+    <p className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
       {children}
     </p>
+  )
+}
+
+function MetaItem({
+  icon: Icon,
+  label,
+  children,
+}: {
+  icon: LucideIcon
+  label: string
+  children: React.ReactNode
+}) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+      <span className="sr-only">{label}: </span>
+      {children}
+    </span>
   )
 }
 
@@ -173,13 +202,18 @@ function ClaimSection({ finding }: { finding: Finding }) {
     <Section title="What they said">
       <Quote>“{source.quote}”</Quote>
       <Meta>
-        <span className="break-all text-foreground">{source.name}</span>
-        {source.speaker && <span>Speaker: {source.speaker}</span>}
+        <MetaItem icon={FileText} label="File">
+          <span className="break-all text-foreground">{source.name}</span>
+        </MetaItem>
+        {source.speaker && (
+          <MetaItem icon={User} label="Speaker">
+            {source.speaker}
+          </MetaItem>
+        )}
         {time && (
-          <span className="tabular-nums">
-            <span className="sr-only">Time in the audio: </span>
-            {time}
-          </span>
+          <MetaItem icon={Clock} label="Time in the audio">
+            <span className="tabular-nums">{time}</span>
+          </MetaItem>
         )}
       </Meta>
       <ClipPlayer key={finding.id} finding={finding} />
@@ -203,7 +237,9 @@ function ProofSection({ finding }: { finding: Finding }) {
     <Section title="The proof">
       <Quote>“{proof.quote}”</Quote>
       <Meta>
-        <span className="break-all text-foreground">{proof.name}</span>
+        <MetaItem icon={FileText} label="File">
+          <span className="break-all text-foreground">{proof.name}</span>
+        </MetaItem>
         {href ? (
           <a
             href={href}

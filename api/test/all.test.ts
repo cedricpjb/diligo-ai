@@ -942,3 +942,40 @@ test('text claims reach Jev only when code found a relevant passage', async () =
   const weak = await callCheck('The office was great.', [{ type: 'text', quote: 'The office was great.' }], proof, jev);
   assert.equal(state.calls, 1); assert.equal(weak.findings[0]!.decision, 'NEEDS_REVIEW');
 });
+
+test('currency: a "$100 million" claim against "€100 million" proof is NEEDS_REVIEW, not YES, and never reaches Jev', async () => {
+  const { jev, state } = countingJev();
+  const claim = 'Revenue for Q3 2026 was $100 million';
+  for (const proof of ['Q3 2026\nRevenue was €100 million', 'Q3 2026\nRevenue was 100 million euros', 'Q3 2026\nRevenue was EUR 100 million',
+    'Q3 2026\nRevenue was 100 million', 'Q3 2026\n(€ in millions)\nNet revenue 100', 'Q3 2026\nNet revenue 100 million', 'Revenue was €100 million']) {
+    const result = await callCheck(`${claim}.`, [moneyClaim(claim, '$100 million', 'Q3 2026')], proof, jev);
+    const finding = result.findings[0]!;
+    assert.equal(finding.decision, 'NEEDS_REVIEW', proof); assert.equal(finding.jev_probability, null);
+    assert.equal(finding.proof_usd, null); assert.equal(finding.gap_usd, null);
+  }
+  const euro = await callCheck(`${claim}.`, [moneyClaim(claim, '$100 million', 'Q3 2026')], 'Q3 2026\nRevenue was €100 million', jev);
+  assert.match(euro.findings[0]!.explanation, /not clearly in US dollars/);
+  assert.equal(state.calls, 0);
+  // Clear USD markers still compare: $, US$, USD, and a "$ in millions" heading.
+  for (const proof of ['Q3 2026\nRevenue was $100 million', 'Q3 2026\nRevenue was US$100 million', 'Q3 2026\nRevenue was USD 100 million',
+    'Q3 2026\n($ in millions)\nNet revenue 100']) {
+    const result = await callCheck(`${claim}.`, [moneyClaim(claim, '$100 million', 'Q3 2026')], proof, jev);
+    assert.equal(result.findings[0]!.decision, 'YES', proof);
+  }
+});
+
+test('per-share rows are never scaled by the table heading; an unclear unit fails closed', async () => {
+  const table = 'Q3 2026 results\n($ in millions, except per share data)\nEarnings per common share 5.07';
+  const claim = 'Earnings per common share was $5.07 in Q3 2026';
+  const { jev, state } = countingJev();
+  const yes = await callCheck(`${claim}.`, [moneyClaim(claim, '$5.07', 'Q3 2026')], table, jev);
+  assert.equal(yes.findings[0]!.decision, 'YES'); assert.equal(yes.findings[0]!.proof_usd, '5.07'); assert.equal(yes.findings[0]!.gap_usd, '0.00');
+  for (const label of ['Earnings per diluted share', 'Earnings per basic share', 'Earnings per share', 'EPS', 'Diluted EPS']) {
+    const figure = filingFigures(source(`Q3 2026 results\n($ in millions)\n${label} 5.07`))[0]!;
+    assert.equal(figure.money!.cents, 507n, label); assert.equal(figure.unitUnclear, false, label);
+  }
+  const other = 'Profit per employee was $5.07 in Q3 2026';
+  const review = await callCheck(`${other}.`, [moneyClaim(other, '$5.07', 'Q3 2026')], 'Q3 2026 results\n($ in millions)\nProfit per employee 5.07', jev);
+  assert.equal(review.findings[0]!.decision, 'NEEDS_REVIEW'); assert.match(review.findings[0]!.explanation, /unit that cannot be told/);
+  assert.equal(state.calls, 0);
+});

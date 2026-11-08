@@ -6,8 +6,21 @@ import type { Money, SourceText } from './types.js';
 
 // A percentage in 1e-4 percent units (15.7% is 157000) with the precision it was written at.
 export interface Percent { value: bigint; quantum: bigint }
+// 'USD' only when the amount itself ($, US$, USD) or a USD heading says so. A foreign symbol or code, a mix of both,
+// or no marker at all is never USD: such an amount must not be compared with a USD claim.
+export type Currency = 'USD' | 'other' | 'unknown';
 export interface Figure {
   key: string; money: Money | null; percent: Percent | null; period: string | null; quote: string; source: SourceText;
+  currency: Currency;
+  // The row sits under a scale heading but its unit (per employee, share count...) cannot be told: fail closed.
+  unitUnclear: boolean;
+}
+const OTHER_CURRENCY = /[€£¥₹]|\b(?:EUR|GBP|JPY|CNY|RMB|CAD|AUD|CHF|INR|NZD|HKD|SGD|euros?|pounds?|yen|yuan|francs?)\b|\b(?:C|A|HK|NZ|S)\$/i;
+// A number followed by a scale word ("100 million", "2.5bn").
+export function hasScaledAmount(text: string): boolean { return /\d\s*(?:trillions?|billions?|millions?|thousands?|bn|mm|tn|[KMB])\b/i.test(text); }
+export function currencyOf(text: string): Currency {
+  if (OTHER_CURRENCY.test(text)) return 'other';
+  return /\$|\bUSD\b|\bU\.?S\.?\s+dollars?\b/i.test(text) ? 'USD' : 'unknown';
 }
 
 export function parsePercent(text: string, negative = false): Percent {
@@ -41,7 +54,8 @@ export function labelBefore(text: string): string | null {
   const pieces = text.split(/[.,;:()|—]/);
   const tokens = (pieces[pieces.length - 1] ?? '').match(/[A-Za-z0-9][A-Za-z0-9&'/-]*/g) ?? [];
   let end = tokens.length;
-  while (end > 0 && BREAK.has(tokens[end - 1]!.toLowerCase())) end--;
+  // "US" and "USD" right before the amount belong to the currency ("US$100 million"), not to the metric name.
+  while (end > 0 && (BREAK.has(tokens[end - 1]!.toLowerCase()) || /^(?:us|usd)$/i.test(tokens[end - 1]!))) end--;
   let start = end;
   while (start > 0 && end - start < 6 && !BREAK.has(tokens[start - 1]!.toLowerCase())) start--;
   return start === end ? null : tokens.slice(start, end).join(' ');
@@ -98,27 +112,35 @@ function tableRow(raw: string): Row | null {
   if (tokens.length === 1 && /^(?:19|20)\d{2}$/.test(tokens[0]!)) return null;
   return { label, values: tokens.map(token => VALUE.test(token) ? token : null) };
 }
-function valueFigure(token: string, label: string, scale: bigint): Pick<Figure, 'money' | 'percent'> | null {
+// Per share, per common share, per diluted share, per basic share, EPS: already in dollars, never scaled by the heading.
+const PER_SHARE = /\bper\s+(?:[a-z]+\s+){0,2}shares?\b|\bEPS\b/i;
+// A unit word that is not per-share: "per employee", a share count. Under a scale heading it is anyone's guess.
+const OTHER_UNIT = /\bper\b|\bshares?\b/i;
+function valueFigure(token: string, label: string, scale: bigint): (Pick<Figure, 'money' | 'percent'> & { unclear: boolean }) | null {
   const negative = token.startsWith('(') || /^\(?[-−]/.test(token);
   const digits = token.replace(/[()$,%\-−]/g, '');
   try {
-    if (token.includes('%') || RATIO_LABEL.test(label)) return { money: null, percent: parsePercent(digits, negative) };
-    const perShare = /\bper\s+share\b|\bEPS\b/i.test(label);
-    return { money: parseMoney(`${negative ? '-' : ''}${digits}`, perShare ? 1n : scale), percent: null };
+    if (token.includes('%') || RATIO_LABEL.test(label)) return { money: null, percent: parsePercent(digits, negative), unclear: false };
+    const perShare = PER_SHARE.test(label);
+    return { money: parseMoney(`${negative ? '-' : ''}${digits}`, perShare ? 1n : scale), percent: null,
+      unclear: !perShare && scale !== 1n && OTHER_UNIT.test(label) };
   } catch { return null; }
 }
-const NON_USD = /^(?:currency\s*:\s*)?(?:USD|EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR)\b/i;
 export function filingFigures(source: SourceText): Figure[] {
   const out: Figure[] = [];
-  let scale = 1n; let usd = true; let period: string | null = null; let columns: (string | null)[] | null = null;
+  let scale = 1n; let heading: Currency = 'unknown'; let period: string | null = null; let columns: (string | null)[] | null = null;
   for (const raw of source.text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
     const lineScale = unitFromText(line);
     if (lineScale) scale = lineScale;
-    if (NON_USD.test(line) && !/\b(revenue|cash|debt)\b/i.test(line)) usd = /\bUSD\b/i.test(line);
     const periods = periodsInOrder(line);
     const row = tableRow(line);
+    // A heading ("$ in millions", "Currency: EUR") sets the currency of the amounts under it.
+    if (!row && (lineScale || !/\d/.test(stripPeriods(line)))) {
+      const named = currencyOf(line);
+      if (named !== 'unknown') heading = named;
+    }
     if (row) {
       const key = metricKey(row.label);
       if (!key) continue;
@@ -128,7 +150,10 @@ export function filingFigures(source: SourceText): Figure[] {
           : row.values.length === 1 ? period : null;
         if (!column) return;
         const value = valueFigure(token, row.label, scale);
-        if (value && (value.percent || usd)) out.push({ key, ...value, period: column, quote: line, source });
+        if (!value) return;
+        const own = currencyOf(`${row.label} ${token}`);
+        const currency: Currency = own === 'other' || (own === 'USD' && heading === 'other') ? 'other' : own === 'USD' ? 'USD' : heading;
+        out.push({ key, money: value.money, percent: value.percent, unitUnclear: value.unclear, currency, period: column, quote: line, source });
       });
       continue;
     }
@@ -138,11 +163,11 @@ export function filingFigures(source: SourceText): Figure[] {
       else if (periods.length === 1) { period = periods[0] ?? null; columns = null; }
       continue;
     }
-    proseFigures(line, period, usd, source, out);
+    proseFigures(line, period, heading, source, out);
   }
   return out;
 }
-function proseFigures(line: string, sectionPeriod: string | null, usd: boolean, source: SourceText, out: Figure[]): void {
+function proseFigures(line: string, sectionPeriod: string | null, heading: Currency, source: SourceText, out: Figure[]): void {
   interface Hit { index: number; end: number; money: Money | null; percent: Percent | null }
   const hits: Hit[] = [];
   for (const match of line.matchAll(new RegExp(AMOUNT_PATTERN, 'gi'))) {
@@ -163,13 +188,16 @@ function proseFigures(line: string, sectionPeriod: string | null, usd: boolean, 
     if (!key && previousKey && /\b(?:compared|versus|vs|from|and)\b/i.test(between)) key = previousKey;
     previousEnd = hit.end; previousKey = key ?? previousKey;
     if (!key || CHANGE.test(line.slice(Math.max(0, hit.index - 60), hit.index))) return;
-    if ((hit.money && !usd)) return;
+    // The amount's own marker (a few characters either side) beats the heading; both USD and foreign is ambiguous.
+    const named = /^\s*(?:U\.?S\.?\s+dollars?|USD|euros?|EUR|pounds?|GBP|yen|JPY|yuan|CNY|francs?|CHF|CAD|AUD|INR)\b/i.exec(line.slice(hit.end))?.[0] ?? '';
+    const near = currencyOf(`${line.slice(Math.max(0, hit.index - 4), hit.end)} ${named}`);
+    const currency: Currency = !hit.money ? 'unknown' : near !== 'unknown' ? near : heading;
     const after = line.slice(hit.end, hits[position + 1]?.index ?? line.length);
     const own = [...new Set(periodsInOrder(after))];
     const before = periodsInOrder(line.slice(0, hit.index));
     const period = own.length === 1 ? own[0]! : linePeriods.length === 1 ? linePeriods[0]! : linePeriods.length === 0 ? sectionPeriod
       : before[before.length - 1] ?? null;
     if (!period || period === 'AMBIGUOUS') return;
-    out.push({ key, money: hit.money, percent: hit.percent, period, quote: line, source });
+    out.push({ key, money: hit.money, percent: hit.percent, period, quote: line, source, currency, unitUnclear: false });
   });
 }

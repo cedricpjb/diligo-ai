@@ -221,7 +221,7 @@ export function extractClaims(source: SourceText): Claim[] {
       claims.push({ metric: columns[0]!.toLowerCase() as Metric, source, quote: line, period: csvPeriod, money, offset });
       continue;
     }
-    const expression = new RegExp(String.raw`\b(revenue|cash(?:\s+on\s+hand)?|(?:total\s+)?debt)\b"?\s*(?:for\s+the\s+period\s+)?(?:(?:was|is|of|[:,=])\s*)?"?(${AMOUNT_PATTERN})(?![\d,]|\.\d|\s*(?:EUR|GBP|CAD)\b)`, 'gi');
+    const expression = new RegExp(String.raw`\b(revenue|cash(?:\s+on\s+hand)?|(?:total\s+)?debt)\b"?\s*(?:for\s+the\s+period\s+)?(?:(?:was|is|of|[:,=])\s*)?"?(${AMOUNT_PATTERN})(?![\d,]|\.\d|\s*(?:EUR|GBP|CAD|JPY|AUD|CHF|CNY|INR|euros?|pounds?|yen|yuan|francs?)\b)`, 'gi');
     for (const match of line.matchAll(expression)) {
       // Avoid treating a currency-free year or a malformed amount prefix as money.
       const after = line.slice(match.index! + match[0].length);

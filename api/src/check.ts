@@ -1,6 +1,6 @@
 import { contractRows, extractClaims, isMetric, sameContractPeriod, samePeriod } from './extract.js';
 import { abs, compareMoney, containsMoney, decimal, roundTo } from './money.js';
-import { amountContext, comparePercent, filingFigures, forwardLooking, percentClaim } from './filing.js';
+import { amountContext, comparePercent, currencyOf, hasScaledAmount, filingFigures, forwardLooking, percentClaim } from './filing.js';
 import { validProbability, type Jev } from './jev.js';
 import type { CheckResponse, Claim, Decision, Finding, SourceText } from './types.js';
 import { createClaude, explainFinding, type Claude } from './claude.js';
@@ -40,6 +40,8 @@ interface Ranked { finding: Finding; claim: Claim }
 export const FORWARD_LOOKING = 'forward-looking, not verifiable against reported results';
 const UNMATCHED = 'The proof does not address this claim: no passage in it matches the claim, so Jev was not asked.';
 const UNPARSED_SCALE = 'The amount has a scale word that could not be parsed, so no amount is shown.';
+const NOT_USD = 'The proof has an amount for this metric and period, but it is not clearly in US dollars (a non-USD currency, or no currency marker), so it was not compared with the USD claim.';
+const UNCLEAR_UNIT = 'The proof row for this metric has a unit that cannot be told (it is not clearly dollars in the table scale), so it was not compared.';
 const UNREADABLE_AMOUNT = 'The amount could not be read safely as US dollars, so it needs review.';
 // A passage is relevant only when it shares the claim's metric, an entity or a number, not merely a couple of common words.
 function textEvidence(claim: Claim, sources: SourceText[]): { source: SourceText; quote: string } | null {
@@ -131,11 +133,24 @@ export async function checkClaims(claimSources: SourceText[], proofSources: Sour
       if (!claim.money) lock(UNREADABLE_AMOUNT);
       else if (claim.period === 'AMBIGUOUS') lock('The claim period could not be determined unambiguously, so it needs review.');
       else {
-        const candidates = !key || context?.change ? [] : [
-          ...(isMetric(claim.metric) ? evidence.filter(e => e.metric === claim.metric && e.money && samePeriod(e.period, claim.period))
-            .map(e => ({ money: e.money!, quote: e.quote, source: e.source })) : []),
-          ...figures.filter(f => f.money && f.key === key && samePeriod(f.period, claim.period))
-            .map(f => ({ money: f.money!, quote: f.quote, source: f.source })),
+        const usable = !key || context?.change ? false : true;
+        const direct = usable && isMetric(claim.metric)
+          ? evidence.filter(e => e.metric === claim.metric && e.money && samePeriod(e.period, claim.period)) : [];
+        const directQuotes = new Set(direct.map(e => `${e.source.name}\0${e.quote}`));
+        const found = usable ? figures.filter(f => f.money && f.key === key && samePeriod(f.period, claim.period)
+          && !directQuotes.has(`${f.source.name}\0${f.quote}`)) : [];
+        // A proof amount is compared with a USD claim only when it is clearly USD and its unit is clear.
+        // Plain records (CSV, "Revenue USD 100") keep their long-standing meaning. A scaled amount with no marker anywhere
+        // ("Revenue was 100 million") could be any currency.
+        const ambiguousDirect = direct.some(e => hasScaledAmount(e.quote)
+          && (currencyOf(e.quote) !== 'unknown' ? currencyOf(e.quote) : currencyOf(e.source.text.slice(0, e.source.text.indexOf(e.quote)))) !== 'USD');
+        const foreign = ambiguousDirect || found.some(f => f.currency !== 'USD');
+        const unclear = found.find(f => f.unitUnclear);
+        if (foreign) { lock(NOT_USD); ranked.push({ finding, claim }); continue; }
+        if (unclear) { lock(UNCLEAR_UNIT); ranked.push({ finding, claim }); continue; }
+        const candidates = [
+          ...direct.map(e => ({ money: e.money!, quote: e.quote, source: e.source })),
+          ...found.map(f => ({ money: f.money!, quote: f.quote, source: f.source })),
         ];
         // Most precise figure first. A rounded headline ("$14.4 billion") agrees with an exact table cell (14,393 million)
         // when the exact figure rounds to it; anything else is a genuine conflict.

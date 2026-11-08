@@ -1,6 +1,6 @@
-import type { Segment } from './types.js';
+import type { Segment, WordTiming } from './types.js';
 import type { Transport } from './jev.js';
-export interface Transcription { segments: Segment[]; mocked: boolean }
+export interface Transcription { segments: Segment[]; mocked: boolean; text?: string; wordTimings?: WordTiming[] }
 export interface Transcriber { transcribe(audio: Blob, name: string): Promise<Transcription> }
 export function createMockTranscriber(): Transcriber {
   return { async transcribe(_audio, name) {
@@ -30,8 +30,10 @@ export function createTranscriber(apiKey?: string, transport: Transport = fetch)
       });
       if (!response.ok) throw new Error();
       const body = await response.json() as { text?: unknown; words?: Word[] };
+      // Timestamps are required: a response without word timings is rejected, never turned into untimed claims.
       if (typeof body?.text !== 'string' || !Array.isArray(body.words)) throw new Error();
       const segments: Segment[] = [];
+      const timed: (WordTiming & { segment: number })[] = [];
       let cursor = 0;
       for (const word of body.words) {
         if (typeof word?.text !== 'string' || !Number.isFinite(word.start) || !Number.isFinite(word.end)
@@ -44,17 +46,23 @@ export function createTranscriber(apiKey?: string, transport: Transport = fetch)
         if (word.type === 'spacing') {
           if (previous) previous.text += prefix + word.text;
         } else if (previous && previous.speaker === speaker) {
+          timed.push({ segment: segments.length - 1, from: previous.text.length + prefix.length,
+            to: previous.text.length + prefix.length + word.text.length, start: word.start, end: word.end });
           previous.text += prefix + word.text;
           previous.end = Math.max(previous.end, word.end);
         } else {
           if (previous) previous.text += prefix;
           segments.push({ source: name, start: word.start, end: word.end, speaker, text: word.text });
+          timed.push({ segment: segments.length - 1, from: 0, to: word.text.length, start: word.start, end: word.end });
         }
         cursor = index + word.text.length;
       }
       if (body.text.trim() && !segments.length) throw new Error();
       if (segments.length) segments.at(-1)!.text += body.text.slice(cursor);
-      return { segments, mocked: false };
+      let offset = 0;
+      const offsets = segments.map(segment => { const start = offset; offset += segment.text.length + 1; return start; });
+      const wordTimings = timed.map(({ segment, ...word }) => ({ ...word, from: word.from + offsets[segment]!, to: word.to + offsets[segment]! }));
+      return { segments, wordTimings, mocked: false };
     } catch { throw new Error('Transcription request failed.'); }
   } };
 }

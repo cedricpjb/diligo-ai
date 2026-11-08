@@ -49,14 +49,44 @@ loads keys into the frontend. Available names:
 - `JEV_YES_THRESHOLD` / `JEV_NO_THRESHOLD` (defaults `0.80` / `0.20`), finite values
   in `[0, 1]`, with NO strictly below YES. These thresholds are unvalidated.
 
-No keys or document contents are logged. Uploads stay in memory; no source files
-are written to disk. Upstream exceptions are replaced with generic errors.
+No keys or document contents are logged. Text, proof and audio uploads stay in
+memory and are never written to disk. Upstream exceptions are replaced with generic errors.
 Jev and ElevenLabs request failures return 500. Claude invalid JSON, invalid schema,
 truncated output, or upstream failures retry once and then fall back to the regex
 extractor (or deterministic explanation), explicitly marked `mocked: true`.
 An extraction fallback marks every finding in that check as mocked. Service modules accept injected transports
 for offline testing. The test suite blocks all real external fetches, never reads
 local credentials, and never makes a paid API call.
+
+## Audio timestamps and clips
+
+With `ELEVENLABS_API_KEY` set, uploaded audio goes to ElevenLabs Scribe (`scribe_v2`)
+with word timestamps and speaker diarization. Without the key, the explicitly mocked
+starter transcript is used and nothing is sent to ElevenLabs. Tests never make live
+calls.
+
+Each audio-sourced finding gets two optional fields, `start_ms` and `end_ms`
+(integers in milliseconds, `null` when unknown), taken from the words that overlap
+the claim's quote, plus an opaque `audio_file_id` for clip playback. Text-only
+findings omit these fields. The existing `claim_source` seconds fields, transcript
+segments, and decimal-string money fields keep their types. Mock timings describe
+the demo transcript, not the uploaded recording.
+
+`GET /api/clip?file=<audio_file_id>&start_ms=1200&end_ms=4500` returns the span
+as WAV when ffmpeg is on the PATH, and otherwise the whole recording. Both responses
+carry `X-Clip-Start-Ms`, `X-Clip-End-Ms` and `X-Clip-Mode` (`segment` or
+`whole-file`), so a client can seek and stop at the offsets in whole-file mode.
+Offsets must be whole milliseconds, at most 60 seconds apart.
+
+The clip route never takes a path or filename. `file` must be an ID the server issued
+for an upload in this process; anything else, including `../` or absolute paths, is
+rejected with a 400 before any file is touched. Recordings are kept in memory only,
+never on disk, which keeps the rule that uploads are not written to disk. They expire
+after one hour, at most 100 are kept, and they are gone after a restart. A temporary
+copy exists only while ffmpeg renders a clip, and is deleted afterwards.
+
+`docs/API.md` does not yet describe these optional fields or the clip route. That
+update belongs to the contract owner, because this change edits only `api/`.
 
 ## Supported input
 

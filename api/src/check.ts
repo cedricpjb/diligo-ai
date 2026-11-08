@@ -100,8 +100,18 @@ function baseFinding(claim: Claim, id: string): Finding {
     return claim.offset === undefined ? s.text.includes(claim.quote)
       : claim.offset >= start && claim.offset + claim.quote.length <= start + s.text.length;
   });
+  const offset = claim.offset ?? claim.source.text.indexOf(claim.quote);
+  const words = offset < 0 ? [] : (claim.source.wordTimings ?? [])
+    .filter(word => word.to > offset && word.from < offset + claim.quote.length);
+  const start = words.length ? words[0]!.start : segment?.start;
+  const end = words.length ? words[words.length - 1]!.end : segment?.end;
+  const known = start !== undefined && end !== undefined && Number.isFinite(start) && Number.isFinite(end)
+    && start >= 0 && end >= start && Number.isSafeInteger(Math.round(end * 1000));
   return {
     id, claim: claim.quote,
+    ...(claim.source.segments !== undefined ? { start_ms: known ? Math.round(start! * 1000) : null,
+      end_ms: known ? Math.round(end! * 1000) : null } : {}),
+    ...(claim.source.audioFileId ? { audio_file_id: claim.source.audioFileId } : {}),
     claim_source: { name: claim.source.name, quote: claim.quote, timestamp_start: segment?.start ?? null,
       timestamp_end: segment?.end ?? null, speaker: segment?.speaker ?? null },
     decision: 'NEEDS_REVIEW', label: 'insufficient', jev_probability: null,

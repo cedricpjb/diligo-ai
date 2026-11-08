@@ -9,7 +9,9 @@ import { ENV_FILE, loadConfig, parseConfig } from '../src/config.js';
 import { contractRows, extractClaims, normalizePeriod } from '../src/extract.js';
 import { createJev, type Jev, type Transport } from '../src/jev.js';
 import { compareMoney, containsMoney, decimal, parseMoney } from '../src/money.js';
-import { createTranscriber } from '../src/transcribe.js';
+import { createMockTranscriber, createTranscriber } from '../src/transcribe.js';
+import { AudioStore } from '../src/clips.js';
+import { BadInput, parseUploads } from '../src/uploads.js';
 import { filingFigures, legacyFigures } from '../src/filing.js';
 import { createClaude, explainFinding } from '../src/claude.js';
 import { bareMoneyAmount, claimSchema, claimsSchema, createClaimExtractor, signedContractsAssertion, splitChunks, type ExtractionNote } from '../src/extract.js';
@@ -409,12 +411,19 @@ function assertResponse(value: unknown): asserts value is CheckResponse {
   }
   assert.ok(Array.isArray(value.findings));
   for (const finding of value.findings) {
-    assertObject(finding, ['id', 'claim', 'claim_source', 'label', 'decision', 'jev_probability',
+    // Audio findings may add start_ms/end_ms (integers or null) and audio_file_id; text findings have none of them.
+    const core: Record<string, unknown> = { ...finding };
+    delete core.start_ms; delete core.end_ms; delete core.audio_file_id;
+    assertObject(core, ['id', 'claim', 'claim_source', 'label', 'decision', 'jev_probability',
       'explanation', 'proof_source', 'claimed_usd', 'proof_usd', 'gap_usd', 'gap_pct',
       'priority', 'next_action', 'mocked']);
+    assert.equal(finding.start_ms === undefined, finding.end_ms === undefined, 'start_ms and end_ms appear together');
+    for (const offset of [finding.start_ms, finding.end_ms]) if (offset !== undefined) assert.ok(offset === null || Number.isSafeInteger(offset), 'milliseconds');
+    if (finding.audio_file_id !== undefined) assert.equal(typeof finding.audio_file_id, 'string');
     for (const field of ['id', 'claim', 'explanation', 'next_action']) assert.equal(typeof finding[field], 'string', field);
     assert.ok(finding.decision === 'YES' || finding.decision === 'NO' || finding.decision === 'NEEDS_REVIEW');
-    assert.equal(finding.label, { YES: 'supported', NO: 'discrepancy', NEEDS_REVIEW: 'insufficient' }[finding.decision]);
+    const labelFor: Record<string, string> = { YES: 'supported', NO: 'discrepancy', NEEDS_REVIEW: 'insufficient' };
+    assert.equal(finding.label, labelFor[String(finding.decision)]);
     assert.ok(finding.priority === 'high' || finding.priority === 'medium' || finding.priority === 'low');
     assert.equal(typeof finding.mocked, 'boolean');
     if (finding.jev_probability !== null) {
@@ -662,9 +671,11 @@ test('ElevenLabs adapter: multipart audio, word timestamps and optional speakers
       { text: 'USD 100.', start: 1, end: 2, type: 'word', speaker_id: 'speaker_0' }, { text: 'Cash USD 50.', start: 3, end: 4, type: 'word' },
     ] });
   });
+  // Word offsets are measured in the segment-joined text ("segment\nsegment"), which is the claim source text.
   assert.deepEqual(await service.transcribe(new Blob(['audio']), 'call.m4a'), { mocked: false, segments: [
     { source: 'call.m4a', start: 0, end: 2, speaker: 'speaker_0', text: 'Revenue USD 100. ' }, { source: 'call.m4a', start: 3, end: 4, speaker: null, text: 'Cash USD 50.' },
-  ] });
+  ], wordTimings: [{ from: 0, to: 7, start: 0, end: 1 }, { from: 8, to: 16, start: 1, end: 2 }, { from: 18, to: 30, start: 3, end: 4 }] });
+  assert.equal('Revenue USD 100. \nCash USD 50.'.slice(18, 30), 'Cash USD 50.');
 });
 test('ElevenLabs adapter: absent timing or upstream errors are not fabricated', async () => {
   for (const body of [{ text: 'words' }, { text: 'words', words: [] }, { text: 'word', words: [{ text: 'word', start: -1, end: 2 }] }])
@@ -1578,4 +1589,112 @@ test('subjective outlook cannot become Jev-only YES, while a named event can', a
   assert.equal(subjective.jev_probability, null);
   assert.equal(result.findings.find(f => f.claim === named)!.decision, 'YES');
   assert.equal(calls, 1);
+});
+
+// ---- Audio: ElevenLabs timings, no-key behaviour, and the clip route (stubbed services, no live calls) -----------
+test('audio: without ELEVENLABS_API_KEY the transcriber is the explicit mock and makes no request', async () => {
+  const service = createTranscriber(undefined, async () => assert.fail('No key: nothing may be sent to ElevenLabs.'));
+  const result = await service.transcribe(new Blob(['audio']), 'call.mp3');
+  assert.equal(result.mocked, true); assert.equal(result.wordTimings, undefined);
+  assert.equal(result.segments.length, 3);
+});
+
+test('audio: ElevenLabs word timings reach the finding as start_ms and end_ms, with the audio file ID', async () => {
+  const requests: string[] = [];
+  const transport: Transport = async (url, init) => {
+    requests.push(String(url));
+    assert.equal(new Headers(init!.headers).get('xi-api-key'), 'test-only-credential');
+    return Response.json({ text: 'Revenue USD 1250000.00 for the period.', words: [
+      { text: 'Revenue', start: 1.2, end: 1.5, type: 'word', speaker_id: 'speaker_0' },
+      { text: 'USD', start: 1.6, end: 1.9, type: 'word', speaker_id: 'speaker_0' },
+      { text: '1250000.00', start: 2, end: 2.8, type: 'word', speaker_id: 'speaker_0' },
+      { text: 'for', start: 3, end: 3.2, type: 'word', speaker_id: 'speaker_0' },
+      { text: 'the', start: 3.2, end: 3.4, type: 'word', speaker_id: 'speaker_0' },
+      { text: 'period', start: 3.4, end: 3.9, type: 'word', speaker_id: 'speaker_0' },
+    ] });
+  };
+  const body = new FormData();
+  body.set('claims_audio', new File([new Uint8Array([1, 2, 3])], 'call.mp3', { type: 'audio/mpeg' }));
+  body.set('proof_files', new File(['revenue,1250000.00'], 'proof.csv', { type: 'text/csv' }));
+  const { claims, proofs } = await parseUploads(body, createTranscriber('test-only-credential', transport), async () => 'audio-test-id');
+  assert.deepEqual(requests, ['https://api.elevenlabs.io/v1/speech-to-text']);
+  // The claim text is the segment text the word timings are measured against, so the offsets line up.
+  assert.equal(claims[0]!.text, 'Revenue USD 1250000.00 for the period.');
+  const result = await checkClaims(claims, proofs, neverJev, { extract: extractClaims });
+  assertResponse(result);
+  const finding = result.findings.find(item => item.claim === 'Revenue USD 1250000.00')!;
+  assert.ok(finding, 'the revenue claim is found');
+  assert.equal(finding.start_ms, 1200); assert.equal(finding.end_ms, 2800);
+  assert.equal(finding.audio_file_id, 'audio-test-id');
+  assert.equal(finding.decision, 'YES'); assert.equal(finding.claimed_usd, '1250000.00');
+  assert.equal(finding.claim_source.timestamp_start, 1.2);
+});
+
+test('audio: text findings carry no audio fields (start_ms, end_ms, audio_file_id are absent, not null)', async () => {
+  const body = new FormData();
+  body.set('claims_text', 'Revenue USD 1250000.00');
+  body.set('proof_files', new File(['revenue,1250000.00'], 'proof.csv', { type: 'text/csv' }));
+  const { claims, proofs } = await parseUploads(body, createMockTranscriber());
+  const result = await checkClaims(claims, proofs, neverJev, { extract: extractClaims });
+  assertResponse(result);
+  assert.equal(result.findings.length, 1);
+  assert.ok(!('start_ms' in result.findings[0]!) && !('end_ms' in result.findings[0]!) && !('audio_file_id' in result.findings[0]!));
+});
+
+test('clip store: only IDs this store issued are served; paths, traversal and malformed requests are rejected', async () => {
+  const store = new AudioStore(async () => Buffer.from('WAV'));
+  const id = await store.save(new File([new Uint8Array([1, 2, 3])], 'call.mp3', { type: 'audio/mpeg' }));
+  for (const query of [
+    `file=../../api/.env&start_ms=0&end_ms=1000`, `file=..%2F..%2Fsecret&start_ms=0&end_ms=1000`,
+    `file=${encodeURIComponent('/etc/passwd')}&start_ms=0&end_ms=1000`, `file=${encodeURIComponent('C:\\Windows\\win.ini')}&start_ms=0&end_ms=1000`,
+    `file=00000000-0000-4000-8000-000000000000&start_ms=0&end_ms=1000`, // well-formed, but never issued here
+    `file=${id}&file=${id}&start_ms=0&end_ms=1000`, `file=${id}&start_ms=-1&end_ms=1000`, `file=${id}&start_ms=1.5&end_ms=1000`,
+    `file=${id}&start_ms=5000&end_ms=5000`, `file=${id}&start_ms=0&end_ms=60001`, `file=${id}&start_ms=0`,
+    `file=${id}&start_ms=0&end_ms=1000&path=/etc/passwd`,
+  ]) await assert.rejects(store.clip(new URLSearchParams(query)), BadInput, query);
+  const clip = await store.clip(new URLSearchParams(`file=${id}&start_ms=0&end_ms=1000`));
+  assert.equal(clip.bytes.toString(), 'WAV');
+});
+
+test('clip store: ffmpeg output is served as WAV; without ffmpeg the whole recording is served with its offsets', async () => {
+  const original = Buffer.from([9, 8, 7]);
+  const withFfmpeg = new AudioStore(async (input, extension, start, end) => { assert.deepEqual(input, original); assert.equal(extension, 'mp3'); assert.equal(start, 1200); assert.equal(end, 4500); return Buffer.from('RIFF'); });
+  const id = await withFfmpeg.save(new File([original], 'call.mp3', { type: 'audio/mpeg' }));
+  const rendered = await withFfmpeg.clip(new URLSearchParams(`file=${id}&start_ms=1200&end_ms=4500`));
+  assert.deepEqual([rendered.type, rendered.whole, rendered.startMs, rendered.endMs, rendered.bytes.toString()], ['audio/wav', false, 1200, 4500, 'RIFF']);
+  const without = new AudioStore(async () => null);
+  const whole = await without.clip(new URLSearchParams(`file=${await without.save(new File([original], 'call.mp3', { type: 'audio/mpeg' }))}&start_ms=1200&end_ms=4500`));
+  assert.deepEqual([whole.type, whole.whole, whole.bytes], ['audio/mpeg', true, original]);
+});
+
+test('clip store: uploads are refused for unsupported types, and recordings expire after an hour', async () => {
+  let clock = 1_000_000;
+  const store = new AudioStore(async () => Buffer.from('WAV'), () => clock);
+  await assert.rejects(store.save(new File(['x'], 'payload.html', { type: 'text/html' })), BadInput);
+  await assert.rejects(store.save(new File([], 'empty.mp3', { type: 'audio/mpeg' })), BadInput);
+  const id = await store.save(new File(['abc'], 'call.wav', { type: 'audio/wav' }));
+  clock += 60 * 60 * 1000 + 1;
+  await assert.rejects(store.clip(new URLSearchParams(`file=${id}&start_ms=0&end_ms=1000`)), BadInput);
+});
+
+test('HTTP: GET /api/clip serves an uploaded span and rejects anything outside the store with JSON errors', async () => {
+  const store = new AudioStore(async () => Buffer.from('RIFFWAVE'));
+  const id = await store.save(new File([new Uint8Array([1, 2, 3])], 'call.mp3', { type: 'audio/mpeg' }));
+  const base = (url: string) => url.replace('/api/check', '/api/clip');
+  await withServer(async url => {
+    const ok = await fetch(`${base(url)}?file=${id}&start_ms=1200&end_ms=4500`);
+    assert.equal(ok.status, 200); assert.equal(ok.headers.get('content-type'), 'audio/wav');
+    assert.equal(ok.headers.get('x-clip-start-ms'), '1200'); assert.equal(ok.headers.get('x-clip-end-ms'), '4500');
+    assert.equal(ok.headers.get('x-clip-mode'), 'segment'); assert.equal(ok.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(Buffer.from(await ok.arrayBuffer()).toString(), 'RIFFWAVE');
+    for (const query of ['file=..%2F..%2Fapi%2F.env&start_ms=0&end_ms=1000', `file=${encodeURIComponent('/etc/passwd')}&start_ms=0&end_ms=1000`,
+      `file=${id}&start_ms=0&end_ms=99999`]) {
+      const rejected = await fetch(`${base(url)}?${query}`);
+      assert.equal(rejected.status, 400, query);
+      assert.equal(rejected.headers.get('content-type'), 'application/json');
+      assert.equal(typeof ((await rejected.json()) as { error?: unknown }).error, 'string');
+    }
+    const post = await fetch(`${base(url)}?file=${id}&start_ms=0&end_ms=1000`, { method: 'POST' });
+    assert.equal(post.status, 400);
+  }, { audioStore: store, jev: neverJev });
 });

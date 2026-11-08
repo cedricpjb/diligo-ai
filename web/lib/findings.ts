@@ -1,10 +1,16 @@
 import { toCents } from "./money.ts"
-import type { Decision, Finding, Priority, Source } from "./types.ts"
+import type { Decision, Finding, Label, Priority, Source } from "./types.ts"
 
 export const DECISION_LABEL: Record<Decision, string> = {
   YES: "YES",
   NO: "NO",
   NEEDS_REVIEW: "NEEDS REVIEW",
+}
+
+export const LABEL_TEXT: Record<Label, string> = {
+  supported: "Supported",
+  discrepancy: "Discrepancy",
+  insufficient: "Insufficient",
 }
 
 export const PRIORITY_LABEL: Record<Priority, string> = {

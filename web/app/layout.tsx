@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next"
-import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google"
+import { IBM_Plex_Mono, IBM_Plex_Sans, IBM_Plex_Serif } from "next/font/google"
 import { cookies } from "next/headers"
 
 import { AppHeader } from "@/components/shell/app-header"
@@ -12,6 +12,13 @@ const plexSans = IBM_Plex_Sans({
   variable: "--font-plex-sans",
   subsets: ["latin"],
   weight: ["400", "600"],
+})
+
+const plexSerif = IBM_Plex_Serif({
+  variable: "--font-plex-serif",
+  subsets: ["latin"],
+  weight: ["400", "500"],
+  style: ["normal", "italic"],
 })
 
 const plexMono = IBM_Plex_Mono({
@@ -30,7 +37,7 @@ export const metadata: Metadata = {
 }
 
 export const viewport: Viewport = {
-  themeColor: "#0B1220",
+  themeColor: "#151413",
   colorScheme: "dark",
 }
 
@@ -41,7 +48,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`dark ${plexSans.variable} ${plexMono.variable} h-full antialiased`}
+      className={`dark ${plexSans.variable} ${plexSerif.variable} ${plexMono.variable} h-full antialiased`}
     >
       <body className="min-h-full">
         <a

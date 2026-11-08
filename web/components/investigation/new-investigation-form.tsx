@@ -364,7 +364,7 @@ export function NewInvestigationForm() {
               <Button
                 type="submit"
                 disabled={recordingActive}
-                className="h-11 gap-2 rounded-lg px-6 text-sm font-semibold transition-[background-color,transform] duration-150 hover:-translate-y-px hover:bg-[#fb8a3c] active:translate-y-px active:scale-[0.985]"
+                className="h-11 gap-2 rounded-lg px-6 text-sm font-semibold transition-[background-color,transform] duration-150 hover:-translate-y-px hover:bg-primary/85 active:translate-y-px active:scale-[0.985]"
               >
                 {phase.kind === "failed" ? "Analyze again" : "Analyze"}
                 <ArrowRight className="size-4" aria-hidden />

@@ -11,31 +11,31 @@ function usageLine(asClaim: number, asProof: number): string {
 
 export function SourcesPanel({ usage }: { usage: SourceUsage[] }) {
   return (
-    <section aria-labelledby="sources-title" className="flex flex-col gap-3">
+    <section aria-labelledby="sources-title" className="flex flex-col gap-4">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <h2 id="sources-title" className="text-base font-semibold tracking-tight">
+        <h2 id="sources-title" className="font-serif text-2xl font-medium tracking-tight">
           Sources
         </h2>
-        <p className="text-sm text-muted-foreground">Every document behind these findings.</p>
+        <p className="text-xs text-muted-foreground">Every document behind these findings.</p>
       </div>
 
       {usage.length === 0 ? (
-        <p className="rounded-2xl border border-dashed border-white/15 px-5 py-6 text-sm text-muted-foreground">
+        <p className="border-t border-border py-6 text-sm text-muted-foreground">
           The server listed no sources for this check.
         </p>
       ) : (
-        <ul className="grid gap-3 sm:grid-cols-2">
+        <ul className="grid border-b border-border sm:grid-cols-2 sm:gap-x-10">
           {usage.map(({ source, asClaim, asProof }) => {
             const href = safeHttpUrl(source.url)
             const Icon = source.type === "sec" ? Landmark : FileText
             return (
               <li
                 key={`${source.type}:${source.name}`}
-                className="flex items-start gap-3 rounded-2xl border border-border bg-card p-4 shadow-card"
+                className="flex items-start gap-3 border-t border-border py-4"
               >
                 <span
                   aria-hidden
-                  className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-surface-raised text-muted-foreground"
+                  className="grid size-8 shrink-0 place-items-center rounded-[3px] border border-border text-muted-foreground"
                 >
                   <Icon className="size-4" />
                 </span>

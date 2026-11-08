@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { ChevronRight, Flag, Check } from "lucide-react"
+import { Check, Flag } from "lucide-react"
 
 import {
   FINDINGS_SORT_NOTE,
@@ -14,23 +14,15 @@ import {
 import { formatPct, formatUsd } from "@/lib/money"
 import type { Finding } from "@/lib/types"
 import { cn } from "@/lib/utils"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
 import { DecisionBadge, MockedBadge } from "./decision-badge"
 
 interface FindingsTableProps {
   findings: Finding[]
   reviews: Record<string, ReviewState | undefined>
+  /** The finding whose evidence is open, so its row can stand out. */
+  activeId?: string | null
   onOpen: (id: string) => void
 }
-
-const NO_VALUE = "—"
 
 type Filter = "all" | "NO" | "YES" | "NEEDS_REVIEW"
 
@@ -41,7 +33,9 @@ const FILTERS: { id: Filter; label: string }[] = [
   { id: "NEEDS_REVIEW", label: "Needs review" },
 ]
 
-export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableProps) {
+const CAPTION = "text-[11px] font-semibold tracking-[0.14em] text-muted-foreground uppercase"
+
+export function FindingsTable({ findings: all, reviews, activeId, onOpen }: FindingsTableProps) {
   const [filter, setFilter] = useState<Filter>("all")
   const showFilters = all.length >= MANY_FINDINGS
   const active = showFilters ? filter : "all"
@@ -50,12 +44,12 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
     id === "all" ? all.length : all.filter((f) => f.decision === id).length
 
   return (
-    <section aria-labelledby="findings-title" className="flex flex-col gap-3">
+    <section aria-labelledby="findings-title" className="flex flex-col gap-4">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <h2 id="findings-title" className="text-base font-semibold tracking-tight">
+        <h2 id="findings-title" className="font-serif text-2xl font-medium tracking-tight">
           Findings
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           {FINDINGS_SORT_NOTE} Select a finding to see the evidence.
         </p>
       </div>
@@ -69,9 +63,9 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
               aria-pressed={active === id}
               onClick={() => setFilter(id)}
               className={cn(
-                "inline-flex h-9 items-center gap-2 rounded-full border px-3.5 text-sm font-semibold transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                "inline-flex h-9 items-center gap-2 rounded-[3px] border px-3.5 text-sm font-semibold transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 active === id
-                  ? "border-foreground/40 bg-white/[0.08] text-foreground"
+                  ? "border-foreground/40 bg-card text-foreground"
                   : "border-border text-muted-foreground hover:text-foreground"
               )}
             >
@@ -82,170 +76,119 @@ export function FindingsTable({ findings: all, reviews, onOpen }: FindingsTableP
         </div>
       )}
 
-      {/* Wide screens (with the sidebar open, 1280px and up): a table. */}
-      <div className="hidden overflow-hidden rounded-2xl border border-border bg-card shadow-card xl:block">
-        <Table>
-          <caption className="sr-only">
-            Findings sorted by decision, then priority or Jev score. Select a row to open its evidence.
-          </caption>
-          <TableHeader>
-            <TableRow className="hover:bg-transparent">
-              <TableHead className="h-11 pl-5">Claim</TableHead>
-              <TableHead className="h-11">Decision</TableHead>
-              <TableHead className="h-11 text-right">Claimed</TableHead>
-              <TableHead className="h-11 text-right">Proof</TableHead>
-              <TableHead className="h-11 text-right">Gap</TableHead>
-              <TableHead className="h-11 pr-5 text-right">Jev probability</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {findings.length === 0 && (
-              <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={6} className="px-5 py-6 whitespace-normal text-muted-foreground">
-                  No findings match this filter.
-                </TableCell>
-              </TableRow>
-            )}
-            {findings.map((finding) => {
-              const gap = formatUsd(finding.gap_usd)
-              const pct = formatPct(finding.gap_pct)
-              const jev = formatProbability(finding.jev_probability)
-              return (
-                <TableRow
-                  key={finding.id}
-                  onClick={() => onOpen(finding.id)}
-                  className="h-16 cursor-pointer has-focus-visible:bg-muted"
-                >
-                  <TableCell className="max-w-0 min-w-64 py-0 pl-5 whitespace-normal">
-                    <button
-                      type="button"
-                      className="-m-2 flex w-[calc(100%+1rem)] items-start gap-2 rounded-lg p-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      aria-label={`Open evidence: ${finding.claim}`}
-                    >
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-sm leading-snug font-semibold text-foreground">
-                          {finding.claim}
-                        </span>
-                        <span className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                          <span>{PRIORITY_LABEL[finding.priority]} priority</span>
-                          <ReviewChip state={reviews[finding.id]} />
-                          {finding.mocked && <MockedBadge />}
-                        </span>
-                      </span>
-                    </button>
-                  </TableCell>
-                  <TableCell className="py-0">
-                    <DecisionBadge decision={finding.decision} />
-                  </TableCell>
-                  <TableCell className="py-0 text-right tabular-nums">
-                    <Amount value={formatUsd(finding.claimed_usd)} />
-                  </TableCell>
-                  <TableCell className="py-0 text-right tabular-nums">
-                    {hasNoProof(finding) ? <NoProof /> : <Amount value={formatUsd(finding.proof_usd)} />}
-                  </TableCell>
-                  <TableCell className="py-0 text-right tabular-nums">
-                    {gap ? (
-                      <>
-                        <span className="block text-foreground">{gap}</span>
-                        {pct && <span className="block text-xs text-muted-foreground">{pct}</span>}
-                      </>
-                    ) : (
-                      <Amount value={null} />
-                    )}
-                  </TableCell>
-                  <TableCell className="py-0 pr-5 text-right tabular-nums">
-                    <span className="inline-flex items-center justify-end gap-2">
-                      {jev ? <span className="text-foreground">{jev}</span> : <Amount value={null} />}
-                      <ChevronRight
-                        className="size-4 text-muted-foreground"
-                        aria-hidden
-                      />
-                    </span>
-                  </TableCell>
-                </TableRow>
-              )
-            })}
-          </TableBody>
-        </Table>
-      </div>
-
-      {/* Phones, tablets and small laptops: the same findings as cards. */}
-      <ul className="grid gap-3 md:grid-cols-2 xl:hidden">
-        {findings.map((finding) => {
-          const gap = formatUsd(finding.gap_usd)
-          const pct = formatPct(finding.gap_pct)
-          const jev = formatProbability(finding.jev_probability)
-          return (
-            <li key={finding.id}>
-              <button
-                type="button"
-                onClick={() => onOpen(finding.id)}
-                className="flex w-full flex-col gap-3 rounded-2xl border border-border bg-card p-4 text-left shadow-card transition-colors duration-150 outline-none hover:bg-surface-raised focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <span className="flex flex-wrap items-center gap-2">
-                  <DecisionBadge decision={finding.decision} />
-                  {finding.mocked && <MockedBadge />}
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    {PRIORITY_LABEL[finding.priority]} priority
-                  </span>
-                </span>
-                <span className="text-sm leading-snug font-semibold text-foreground">
-                  {finding.claim}
-                </span>
-                <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
-                  <Stat label="Claimed" value={formatUsd(finding.claimed_usd)} />
-                  <Stat
-                    label="Proof"
-                    value={formatUsd(finding.proof_usd)}
-                    empty={hasNoProof(finding) ? <NoProof /> : undefined}
-                  />
-                  <Stat label="Gap" value={gap} sub={pct} />
-                  <Stat label="Jev probability" value={jev} />
-                </dl>
-                {reviews[finding.id] && <ReviewChip state={reviews[finding.id]} />}
-              </button>
-            </li>
-          )
-        })}
-      </ul>
+      {findings.length === 0 ? (
+        <p className="border-t border-border py-6 text-sm text-muted-foreground">
+          No findings match this filter.
+        </p>
+      ) : (
+        <ul className="border-b border-border">
+          {findings.map((finding) => (
+            <FindingRow
+              key={finding.id}
+              finding={finding}
+              review={reviews[finding.id]}
+              active={finding.id === activeId}
+              onOpen={onOpen}
+            />
+          ))}
+        </ul>
+      )}
     </section>
   )
 }
 
-function Amount({ value }: { value: string | null }) {
-  return value ? (
-    <span className="text-foreground">{value}</span>
-  ) : (
-    <span className="text-muted-foreground">
-      <span aria-hidden>{NO_VALUE}</span>
-      <span className="sr-only">No amount</span>
-    </span>
+function FindingRow({
+  finding,
+  review,
+  active,
+  onOpen,
+}: {
+  finding: Finding
+  review: ReviewState | undefined
+  active: boolean
+  onOpen: (id: string) => void
+}) {
+  const gap = formatUsd(finding.gap_usd)
+  const jev = formatProbability(finding.jev_probability)
+
+  return (
+    <li className="border-t border-border">
+      <button
+        type="button"
+        aria-label={`Open evidence: ${finding.claim}`}
+        onClick={() => onOpen(finding.id)}
+        className={cn(
+          "-mx-4 grid w-[calc(100%+2rem)] gap-x-6 gap-y-4 px-4 py-5 text-left transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset sm:-mx-5 sm:w-[calc(100%+2.5rem)] sm:px-5 lg:grid-cols-[8.5rem_minmax(0,1fr)_minmax(0,26rem)] lg:py-6",
+          active ? "bg-card shadow-[inset_2px_0_0_var(--brand)]" : "hover:bg-card/60"
+        )}
+      >
+        <span className="flex flex-wrap items-start gap-2 lg:flex-col lg:pt-1">
+          <DecisionBadge decision={finding.decision} />
+          {finding.mocked && <MockedBadge />}
+        </span>
+
+        <span className="min-w-0">
+          <span className="block font-serif text-xl leading-snug font-medium text-pretty lg:text-[22px]">
+            {finding.claim}
+          </span>
+          <span className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs text-muted-foreground">
+            <span>{PRIORITY_LABEL[finding.priority]} priority</span>
+            <span aria-hidden>·</span>
+            <span className="break-all">{finding.claim_source.name}</span>
+            {jev && (
+              <>
+                <span aria-hidden>·</span>
+                <span>Jev probability {jev}</span>
+              </>
+            )}
+            {review && <ReviewChip state={review} />}
+          </span>
+        </span>
+
+        <span className="grid grid-cols-3 gap-3 tabular-nums">
+          <Figure label="Claimed" value={formatUsd(finding.claimed_usd)} />
+          <Figure
+            label="Proof"
+            value={formatUsd(finding.proof_usd)}
+            empty={hasNoProof(finding) ? "No matching proof" : undefined}
+          />
+          <Figure label="Gap" value={gap} sub={formatPct(finding.gap_pct)} strong />
+        </span>
+      </button>
+    </li>
   )
 }
 
-function NoProof() {
-  return <span className="text-xs text-muted-foreground">No matching proof found</span>
-}
-
-function Stat({
+function Figure({
   label,
   value,
   sub,
+  strong,
   empty,
 }: {
   label: string
   value: string | null
   sub?: string | null
-  empty?: React.ReactNode
+  strong?: boolean
+  empty?: string
 }) {
   return (
-    <div>
-      <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="mt-0.5 tabular-nums">
-        {empty && !value ? empty : <Amount value={value} />}
-        {sub && <span className="ml-2 text-xs text-muted-foreground">{sub}</span>}
-      </dd>
-    </div>
+    <span className="block min-w-0">
+      <span className={cn(CAPTION, "block")}>{label}</span>
+      <span className={cn("mt-1 block text-[15px]", strong && "font-semibold")}>
+        {value ?? (
+          empty ? (
+            <span className="text-xs font-normal text-muted-foreground">{empty}</span>
+          ) : (
+            <span className="text-muted-foreground">
+              <span aria-hidden>—</span>
+              <span className="sr-only">No amount</span>
+            </span>
+          )
+        )}
+      </span>
+      {sub && <span className="block text-xs font-normal text-muted-foreground">{sub}</span>}
+    </span>
   )
 }
 
@@ -261,7 +204,7 @@ export function ReviewChip({
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center gap-1.5 rounded-full border border-border px-2.5 text-xs font-semibold whitespace-nowrap text-foreground",
+        "inline-flex items-center gap-1.5 rounded-[3px] border border-border px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap text-foreground",
         className
       )}
     >
